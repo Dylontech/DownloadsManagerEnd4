@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { createInterface } from "node:readline";
-import { stdin, stdout } from "node:process";
+import { stdin, stderr } from "node:process";
 import {
   JsonRpcRequest,
   JsonRpcResponse,
@@ -51,12 +51,14 @@ export class JsonRpcServer {
   // ─── Envío de mensajes ─────────────────────────────────────────────────
 
   sendResponse(response: JsonRpcResponse): void {
-    stdout.write(serializeMessage(response));
+    const msg = serializeMessage(response);
+    stderr.write(msg, () => {});
   }
 
   sendNotification(method: string, params?: unknown): void {
     const notification = createNotification(method, params);
-    stdout.write(serializeMessage(notification));
+    const msg = serializeMessage(notification);
+    stderr.write(msg, () => {});
   }
 
   // ─── Llamada remota (desde el servidor hacia el cliente) ──────────────
@@ -64,7 +66,7 @@ export class JsonRpcServer {
   async call(method: string, params?: unknown, timeout = 5000): Promise<unknown> {
     const id = ++this.requestIdCounter;
     const request: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
-    stdout.write(serializeMessage(request));
+    stderr.write(serializeMessage(request));
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

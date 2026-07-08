@@ -77,6 +77,8 @@ export class YtDlpAdapter extends EventEmitter {
    */
   startDownload(task: DownloadTask): string {
     const { options } = task;
+
+    // Obtener argumentos específicos del provider (si el provider existe en el task)
     const providerArgs: string[] = [];
 
     // Argumentos base
@@ -84,7 +86,7 @@ export class YtDlpAdapter extends EventEmitter {
       "--no-warnings",
       "--newline",
       "--progress-template",
-      "download:%(progress._percent)%|%(progress._speed_bytes_per_second)s|%(progress._eta)s|%(progress._downloaded_bytes)s|%(progress._total_bytes_estimate)s|%(progress._speed)s|%(progress._total_bytes)s",
+      "download:%(progress._percent)s|%(progress._speed_bytes_per_second)s|%(progress._eta)s|%(progress._downloaded_bytes)s|%(progress._total_bytes_estimate)s|%(progress._speed)s|%(progress._total_bytes)s",
       "--print",
       "after_move:filepath:%(filepath)s",
       ...providerArgs,

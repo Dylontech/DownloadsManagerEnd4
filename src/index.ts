@@ -10,6 +10,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
+import process from "node:process";
 import { JsonRpcServer } from "./ipc/JsonRpcServer.js";
 import { DownloadManager } from "./core/DownloadManager.js";
 import { AppDatabase } from "./db/Database.js";
@@ -32,6 +33,9 @@ const DB_PATH = join(DATA_DIR, "data.db");
 // ─── Inicialización ────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  // Forzar stdout sin buffer para IPC con QuickShell
+  (process.stdout as any)._handle?.setBlocking(true);
+
   // ── Capa de persistencia ──
   const db = new AppDatabase(DB_PATH);
   const historyRepo = new HistoryRepository(db);
@@ -341,7 +345,15 @@ async function main(): Promise<void> {
   // ─── Iniciar ─────────────────────────────────────────────────────────────
 
   console.log("[MediaDownloadCenter] Starting IPC server...");
+  // Debug: escribir también a stderr para verificar pipes
+  console.error("[MediaDownloadCenter] stderr: server starting");
+  process.stderr.write("STDERR_READY_TEST\n");
   server.start();
+
+  // Heartbeat a stderr cada 5s para verificar que el proceso vive
+  setInterval(() => {
+    process.stderr.write("HEARTBEAT\n");
+  }, 5000);
 
   // Manejar cierre graceful
   const shutdown = () => {
