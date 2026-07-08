@@ -80,7 +80,8 @@ chmod +x install.sh
 pkill quickshell && quickshell &
 ```
 
-El script `install.sh` verificará las dependencias, instalará los paquetes npm, compilará TypeScript y copiará los módulos QML a la ubicación correcta.
+El script `install.sh` verificará las dependencias, instalará los paquetes npm,
+compilará TypeScript y copiará los módulos QML desde `qml/` hacia la configuración de QuickShell.
 
 ---
 
@@ -103,14 +104,15 @@ npm run build
 ### 3. Verificar módulos QML
 
 ```bash
-# Los módulos QML ya deben estar en la configuración de QuickShell
-ls ~/.config/quickshell/ii/modules/ii/mediaDownloader/
+# Los QML vienen incluidos en el repositorio (carpeta qml/)
+ls ~/Descargas/MediaDownloadCenter/qml/
 
-# Si no existen, crea la estructura:
-mkdir -p ~/.config/quickshell/ii/modules/ii/mediaDownloader/
+# El script install.sh los copia automáticamente a:
+# ~/.config/quickshell/ii/modules/ii/mediaDownloader/
 ```
 
-Los archivos QML del frontend se encuentran en `~/.config/quickshell/ii/modules/ii/mediaDownloader/`. Si estás instalando desde cero, necesitarás copiar los archivos `.qml` a esa ubicación. El script `install.sh` lo hace automáticamente.
+Los archivos QML del frontend están empaquetados en `qml/` dentro del repositorio.
+El script `install.sh` los copia automáticamente a la configuración de QuickShell.
 
 ### 4. Configurar QuickShell
 
