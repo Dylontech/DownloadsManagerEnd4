@@ -76,7 +76,9 @@ Scope {
 
     Process {
         id: process
-        command: ["/bin/bash", "-c", "cd /home/DylontechArch/Descargas/DownLoadsManagerEnd4 && /usr/bin/node dist/index.js"]
+        // __BACKEND_DIR__ es reemplazado por install.sh con la ruta absoluta
+        // del repositorio en el momento de la instalación (paso 4/6).
+        command: ["/bin/bash", "-c", "cd __BACKEND_DIR__ && /usr/bin/node dist/index.js"]
         running: true
         stdinEnabled: true
 

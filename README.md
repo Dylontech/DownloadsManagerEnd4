@@ -68,20 +68,28 @@ Soporta 8 plataformas: YouTube, Twitch, TikTok, Instagram, Twitter/X, Vimeo, Sou
 ## 🚀 Instalación Rápida
 
 ```bash
-# 1. Clona el repositorio
-git clone <url-del-repositorio> ~/Descargas/MediaDownloadCenter
-cd ~/Descargas/MediaDownloadCenter
+# 1. Clona el repositorio donde prefieras
+git clone <url-del-repositorio> ~/Proyectos/DownLoadsManagerEnd4
+cd ~/Proyectos/DownLoadsManagerEnd4
 
 # 2. Da permisos de ejecución y ejecuta el instalador
 chmod +x install.sh
 ./install.sh
 
-# 3. Reinicia QuickShell
-pkill quickshell && quickshell &
+# 3. Recarga QuickShell (config ii)
+pkill -x qs && qs -c ii &
 ```
 
-El script `install.sh` verificará las dependencias, instalará los paquetes npm,
-compilará TypeScript y copiará los módulos QML desde `qml/` hacia la configuración de QuickShell.
+El script `install.sh` (pipeline de 6 pasos) verifica las dependencias, instala
+los paquetes npm, compila TypeScript, copia los módulos QML a la config `ii`,
+**parchea la ruta del backend** con la ubicación real del repo, **integra el
+widget automáticamente** en tu config QuickShell (con backups `*.mdc-backup`) y
+ejecuta un **smoke test** del backend.
+
+> 📖 Detalle completo de pasos, protocolo IPC y arquitectura:
+> [`docs/MAPA_FUNCIONAMIENTO.md`](docs/MAPA_FUNCIONAMIENTO.md)
+
+Flags: `--no-integrate` (no tocar la config) · `--uninstall` (revertir todo).
 
 ---
 
@@ -114,9 +122,16 @@ ls ~/Descargas/MediaDownloadCenter/qml/
 Los archivos QML del frontend están empaquetados en `qml/` dentro del repositorio.
 El script `install.sh` los copia automáticamente a la configuración de QuickShell.
 
-### 4. Configurar QuickShell
+### 4. Configurar QuickShell (automático)
 
-Agrega el widget a tu configuración de QuickShell. Consulta la [documentación de QuickShell](https://github.com/Illogical-Impulse/Quickshell) para más detalles sobre cómo integrar módulos.
+`install.sh` (paso 5/6) edita con backups e idempotencia:
+
+- `~/.config/quickshell/ii/GlobalStates.qml` → propiedad `mediaDownloaderFloatingOpen`
+- `~/.config/quickshell/ii/panelFamilies/IllogicalImpulseFamily.qml` → import + `PanelLoader`
+- `~/.config/quickshell/ii/shell.qml` → `IpcHandler` con target `mediaDownloader`
+
+Si prefieres hacerlo a mano, usa `./install.sh --no-integrate` y replica esas
+tres ediciones consultando el [mapa de funcionamiento](docs/MAPA_FUNCIONAMIENTO.md#7-integración-con-hyprland--quickshell-ii).
 
 ### 5. Reiniciar QuickShell
 
@@ -149,7 +164,17 @@ pkill quickshell && quickshell &
 
 - `Ctrl+V` en el campo de URL para pegar desde el portapapeles
 - `Escape` para limpiar el campo de URL
-- Atajo configurable para toggle de ventana flotante
+- Apertura por IPC (funciona desde terminal, scripts o binds):
+
+```bash
+qs -c ii ipc call mediaDownloader toggle
+```
+
+- Atajo global en `hyprland.conf`:
+
+```ini
+bind = SUPER, D, exec, qs -c ii ipc call mediaDownloader toggle
+```
 
 ---
 
