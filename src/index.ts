@@ -58,6 +58,16 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Las cookies permiten descargar de servicios con verificación anti-bot
+  const applyCookieConfig = (): void => {
+    const cfg = configService.getAll();
+    downloadManager.ytDlpAdapter.setCookieOptions({
+      fromBrowser: cfg.cookiesFromBrowser,
+      file: cfg.cookiesFile,
+    });
+  };
+  applyCookieConfig();
+
   const ytDlpVersion = await downloadManager.ytDlpAdapter.getVersion();
   console.log(`[MediaDownloadCenter] yt-dlp version: ${ytDlpVersion}`);
   console.log(`[MediaDownloadCenter] Providers loaded: ${providers.length}`);
@@ -317,14 +327,16 @@ async function main(): Promise<void> {
     const p = params as Record<string, string>;
     if ("key" in p && "value" in p) {
       configService.set(p.key, p.value);
-      return { success: true };
+    } else {
+      configService.setMany(p);
     }
-    configService.setMany(p);
+    applyCookieConfig();
     return { success: true };
   }, "Set configuration");
 
   server.on("config.reset", () => {
     configService.resetToDefaults();
+    applyCookieConfig();
     return { success: true };
   }, "Reset configuration to defaults");
 

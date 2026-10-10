@@ -223,6 +223,8 @@ export interface AppConfig {
   defaultAudioFormat: AudioFormat;
   defaultQuality: QualityLevel;
   defaultSubtitleLanguages: string[];
+  cookiesFromBrowser: string;   // "" = desactivado (firefox, chrome, chromium, brave, edge, opera, vivaldi)
+  cookiesFile: string;          // ruta a cookies.txt; "" = desactivado
   theme: "dark" | "light";
   widgetMode: WidgetMode;
   checkUpdates: boolean;

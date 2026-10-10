@@ -40,7 +40,10 @@ export class AppDatabase {
     if (version < 1) {
       this.migrationV1();
     }
-    // Future migrations go here (v2, v3, ...)
+    if (version < 2) {
+      this.migrationV2();
+    }
+    // Future migrations go here (v3, v4, ...)
   }
 
   private migrationV1(): void {
@@ -107,6 +110,19 @@ export class AppDatabase {
 
       -- Schema version
       INSERT INTO schema_version (version) VALUES (1);
+    `);
+  }
+
+  /**
+   * v2: cookies para yt-dlp (servicios con verificación anti-bot).
+   */
+  private migrationV2(): void {
+    this.db.exec(`
+      INSERT OR IGNORE INTO config (key, value) VALUES
+        ('cookies_from_browser', ''),
+        ('cookies_file', '');
+
+      INSERT INTO schema_version (version) VALUES (2);
     `);
   }
 

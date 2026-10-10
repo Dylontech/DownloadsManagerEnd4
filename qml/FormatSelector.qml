@@ -48,54 +48,57 @@ Item {
             }
         }
 
-        // ─── Selector de Formato ──────────────────────────────────────────
+        // ─── Formato + calidad (en una fila para ahorrar alto) ────────────
 
-        StyledComboBox {
-            id: formatCombo
+        RowLayout {
             Layout.fillWidth: true
-            implicitHeight: 36
-            buttonIcon: "video_file"
-            model: root.extractAudio
-                ? ["mp3", "flac", "aac", "opus", "ogg", "wav"]
-                : ["mp4", "mkv", "webm", "avi", "mov"]
-            currentIndex: {
-                const idx = model.indexOf(root.selectedFormat);
-                return idx >= 0 ? idx : 0;
-            }
-            onCurrentTextChanged: {
-                root.selectedFormat = currentText;
-            }
-        }
+            spacing: 8
 
-        // ─── Selector de Calidad (solo video) ─────────────────────────────
-
-        StyledComboBox {
-            id: qualityCombo
-            Layout.fillWidth: true
-            implicitHeight: 36
-            buttonIcon: "quality"
-            visible: !root.extractAudio
-            model: [
-                { text: "Auto", value: "auto" },
-                { text: "2160p (4K)", value: "2160p" },
-                { text: "1440p (2K)", value: "1440p" },
-                { text: "1080p", value: "1080p" },
-                { text: "720p", value: "720p" },
-                { text: "480p", value: "480p" },
-                { text: "360p", value: "360p" },
-                { text: "144p", value: "144p" },
-                { text: "Custom", value: "custom" },
-            ]
-            textRole: "text"
-            valueRole: "value"
-            currentIndex: {
-                for (let i = 0; i < model.length; i++) {
-                    if (model[i].value === root.selectedQuality) return i;
+            StyledComboBox {
+                id: formatCombo
+                Layout.fillWidth: true
+                implicitHeight: 36
+                buttonIcon: "video_file"
+                model: root.extractAudio
+                    ? ["mp3", "flac", "aac", "opus", "ogg", "wav"]
+                    : ["mp4", "mkv", "webm", "avi", "mov"]
+                currentIndex: {
+                    const idx = model.indexOf(root.selectedFormat);
+                    return idx >= 0 ? idx : 0;
                 }
-                return 0;
+                onCurrentTextChanged: {
+                    root.selectedFormat = currentText;
+                }
             }
-            onActivated: (index) => {
-                root.selectedQuality = model[index].value;
+
+            StyledComboBox {
+                id: qualityCombo
+                Layout.fillWidth: true
+                implicitHeight: 36
+                buttonIcon: "quality"
+                visible: !root.extractAudio
+                model: [
+                    { text: "Auto", value: "auto" },
+                    { text: "2160p (4K)", value: "2160p" },
+                    { text: "1440p (2K)", value: "1440p" },
+                    { text: "1080p", value: "1080p" },
+                    { text: "720p", value: "720p" },
+                    { text: "480p", value: "480p" },
+                    { text: "360p", value: "360p" },
+                    { text: "144p", value: "144p" },
+                    { text: "Custom", value: "custom" },
+                ]
+                textRole: "text"
+                valueRole: "value"
+                currentIndex: {
+                    for (let i = 0; i < model.length; i++) {
+                        if (model[i].value === root.selectedQuality) return i;
+                    }
+                    return 0;
+                }
+                onActivated: (index) => {
+                    root.selectedQuality = model[index].value;
+                }
             }
         }
 

@@ -74,16 +74,16 @@ Item {
 
             // ─── Barra de progreso ────────────────────────────────────────
 
-            Item {
+            RowLayout {
                 Layout.fillWidth: true
-                height: 18
-                visible: root.task?.status === "running" || root.task?.status === "paused"
+                spacing: 8
+                visible: root.task?.status === "running" || root.task?.status === "paused" || root.task?.status === "queued"
 
                 Rectangle {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width
-                    height: 6
-                    radius: 3
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.preferredHeight: 8
+                    radius: 4
                     color: Appearance.colors.colLayer2
 
                     Rectangle {
@@ -97,6 +97,15 @@ Item {
                         }
                     }
                 }
+
+                StyledText {
+                    Layout.alignment: Qt.AlignVCenter
+                    text: `${Math.round(root.task?.progress?.percent ?? 0)}%`
+                    font.pixelSize: 10
+                    font.family: "monospace"
+                    color: Appearance.colors.colOnLayer0
+                    opacity: 0.7
+                }
             }
 
             // ─── Stats de velocidad ───────────────────────────────────────
@@ -104,7 +113,7 @@ Item {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 12
-                visible: root.task?.status === "running"
+                visible: root.task?.status === "running" || root.task?.status === "paused"
 
                 StatItem {
                     statIcon: "speed"

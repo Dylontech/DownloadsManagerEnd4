@@ -41,6 +41,7 @@ Soporta 8 plataformas: YouTube, Twitch, TikTok, Instagram, Twitter/X, Vimeo, Sou
 - 📜 **Historial** de descargas completo
 - ⭐ **Favoritos** para marcar tus descargas importantes
 - ⚙️ **Configuración** persistente (ruta, formato, calidad)
+- 🍪 **Cookies del navegador** para servicios con verificación anti-bot (YouTube, Instagram)
 - 🖥️ **3 modos de visualización**: pestaña, panel lateral y ventana flotante
 
 ---
@@ -157,12 +158,13 @@ pkill quickshell && quickshell &
 | **Activo** | Descargas en progreso, pausadas y en cola |
 | **Historial** | Lista de todas las descargas completadas |
 | **Favoritos** | Descargas marcadas como favoritas |
-| **Config** | Ruta de descarga, concurrencia, miniaturas, subtítulos |
+| **Config** | Ruta de descarga, concurrencia, miniaturas, subtítulos y cookies (servicios con anti-bot) |
 | **Logs** | Registros de depuración y errores |
 
 ### Atajos
 
 - `Ctrl+V` en el campo de URL para pegar desde el portapapeles
+- `Enter` analiza el enlace pegado; si el enlace ya está analizado, inicia la descarga
 - `Escape` para limpiar el campo de URL
 - Apertura por IPC (funciona desde terminal, scripts o binds):
 
@@ -240,6 +242,46 @@ yt-dlp --version
 # Prueba con un video simple
 yt-dlp -f "best[height<=720]" -o "/tmp/test.mp4" "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 ```
+
+### El vídeo queda a medias y no se puede reproducir
+Si la descarga se cancela o la app se cierra a mitad, yt-dlp deja el archivo
+como `Nombre.mp4.part`: es el trozo descargado, no un vídeo reproducible.
+Vuelve a lanzar la misma descarga y yt-dlp reanuda desde ese `.part`.
+
+La barra de progreso debe ir avanzando; si se quedaba fija en 0 % era un fallo
+corregido del adaptador (faltaba `--progress`), y al cancelar la descarga se
+reiniciaba sola (el reintento automático revivía tareas canceladas).
+
+**Solución**: actualiza el código (`git pull && npm run build`) y reinicia el
+módulo QML.
+
+### "Request media.info timed out" (YouTube u otros)
+El análisis del enlace se hace con yt-dlp y puede tardar; el límite del cliente
+es ahora 75 s para que el backend (45 s) tenga tiempo de devolver el **motivo
+real** en lugar de un timeout genérico.
+
+Si el error real es *"Sign in to confirm you're not a bot"* o similar, el
+servicio exige sesión iniciada: activa cookies en **Config → Cookies
+(anti-bot)** eligiendo tu navegador (Firefox, Chrome, Chromium, Brave…), o
+indica la ruta a un `cookies.txt`. Ver más abajo.
+
+### Servicios que piden sesión (YouTube / Instagram)
+YouTube bloquea las descargas anónimas desde algunas IP con
+`Sign in to confirm you're not a bot`. yt-dlp usa tus cookies del navegador:
+
+1. Abre el panel → pestaña **Config** → sección **Cookies (anti-bot)**.
+2. Elige el navegador donde tienes la sesión iniciada (por ejemplo `Chrome` o
+   `Firefox`) o escribe la ruta a un `cookies.txt` exportado.
+3. Repite el análisis del enlace.
+
+Equivale a `yt-dlp --cookies-from-browser chrome`. Si usas un archivo:
+
+```bash
+# Exporta las cookies con tu extensión favorita y guárdalas, por ejemplo:
+yt-dlp --cookies /ruta/cookies.txt --dump-json "https://youtu.be/XXXXXXXXXXX"
+```
+
+Los cambios se aplican al instante (no hace falta reiniciar el backend).
 
 ### Error de base de datos
 ```bash

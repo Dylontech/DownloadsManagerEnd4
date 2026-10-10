@@ -145,8 +145,12 @@ stateDiagram-v2
 
 - **Concurrencia**: máx. 3 tareas `Running` simultáneas (config `maxConcurrentDownloads`).
 - **Reintentos**: hasta 3 por tarea (`maxRetries`); al fallar se re-encola.
-- **Progreso**: el adaptador parsea el stdout de yt-dlp (`--newline`) y emite
-  `progress` → cola → notificación → QML.
+  Una tarea `Cancelled` **no** se reintenta (el evento de error del proceso
+  terminado a propósito se ignora).
+- **Progreso**: el adaptador parsea el stdout de yt-dlp (`--newline` +
+  `--progress`), usando el marcador literal `progress:` dentro de
+  `--progress-template` (el prefijo anterior al primer `:` es el *tipo* de
+  plantilla y no se imprime), y emite `progress` → cola → notificación → QML.
 - **Persistencia**: al completar se escribe en SQLite; la pestaña *Historial*
   lee con `history.list` / `history.favorites`.
 
@@ -211,10 +215,10 @@ sequenceDiagram
 | `MediaDownloaderIPC.qml` | **Puente**: lanza el Process de Node, `sendRequest()` por stdin, parsea stderr, señales a la UI |
 | `MediaDownloaderFloating.qml` | PanelWindow 480×640, namespace `quickshell:mediaDownloader`, visible según `GlobalStates.mediaDownloaderFloatingOpen` |
 | `MediaDownloaderPanel.qml` | Panel completo: pestañas Activo/Historial/Favoritos/Config/Logs |
-| `MediaDownloaderWidget.qml` | Variante compacta para integrar como pestaña inferior (opcional) |
-| `UrlInput.qml` | Campo de URL con Ctrl+V del portapapeles y Escape |
+| `MediaDownloaderWidget.qml` | Variante compacta para integrar como pestaña inferior: preview/formato en zona desplazable y botón Descargar siempre visible |
+| `UrlInput.qml` | Campo de URL con Ctrl+V del portapapeles, `Enter` (analiza o descarga) y Escape; sanea espacios/saltos al pegar |
 | `MediaPreview.qml` | Tarjeta de previsualización (título, autor, duración, miniatura) |
-| `FormatSelector.qml` | Selectores de formato/calidad/audio |
+| `FormatSelector.qml` | Selectores de audio, formato y calidad (formato + calidad en una fila para ahorrar alto) |
 | `DownloadProgressCard.qml` | Tarjeta de progreso con barra, velocidad, ETA, pausa/cancelar |
 
 ### 5.3 Rutas en runtime
@@ -345,12 +349,26 @@ Repetida desde cero para confirmar que el script implementa la app de verdad:
 | ❌ `better-sqlite3` sin binario nativo | npm ≥11 omite scripts de build nativos sin TTY | Paso 2/6: `npm rebuild` + fallback `npm run install` + verificación del `.node` |
 | ❌ El instalador "éxito" aunque npm fallara | `\|\| true` tragaba errores | Paso 2/6 ahora valida el binario nativo y falla con mensaje claro |
 | ❌ Un paréntesis sin cerrar en install.sh | Typo en `$(grep …)` | Corregido + `bash -n` como verificación |
+| ❌ La UI nunca mostraba progreso (barra fija en 0 %) y las descargas parecían quedarse a medias | `--print` implica `--quiet` (yt-dlp no imprime el progreso en modo silencioso) y el prefijo `download:` de `--progress-template` es el **tipo** de plantilla, no texto literal, así que el adaptador nunca recibía líneas de progreso | Paso `--progress` + marcador literal `progress:` en la plantilla; el adaptador emite `progress` de nuevo |
+| ❌ Al cancelar, la descarga se reiniciaba sola y dejaba el archivo a medias | El evento `error` del proceso cancelado entraba en el reintento automático | `DownloadQueue` ignora los errores de tareas `Cancelled` |
+| ❌ Se superaba la concurrencia máxima y quedaban "huecos" ocupados para siempre | `activeCount` se decrementaba dos veces (cancelación + error) y `remove()` sobre una tarea activa no liberaba el hueco | Cola de huecos como `Set` de tareas activas, liberado una sola vez por tarea |
+| ❌ Procesos yt-dlp huérfanos (y `.part` que nunca terminaban) al pausar y cerrar la app | Un proceso detenido con `SIGSTOP` no procesa `SIGTERM`, y el `SIGKILL` de `killAll()` nunca llegaba a ejecutarse | `SIGCONT` antes de `SIGTERM` y escalado a `SIGKILL` correcto en `cancelDownload()` / `killAll()` |
+| ❌ Tareas completadas sin `filePath` de forma intermitente | Los fragmentos de stdout no respetan los saltos de línea y `stdoutBuffer` nunca se rellenaba (el *fallback* `Destination:` era código muerto) | Buffer de líneas parciales + acumulado completo de stdout |
+| ❌ `media.info` terminaba en "Request … timed out" sin motivo | El cliente esperaba 30 s y el backend tenía el mismo presupuesto, así que el timeout del cliente ganaba siempre y ocultaba el error real de yt-dlp | Cliente 75 s (`MediaDownloaderIPC.requestTimeout`) > backend 45 s; `--socket-timeout 15` evita cuelgues; `execYtDlp` distingue timeout de error y `parseError` devuelve la línea `ERROR:` de yt-dlp |
+| ❌ Al pulsar `Enter` no ocurría nada | `accepted` no es fiable cuando hay manejadores `Keys` en la cadena (verificado: con `Keys.onReturnPressed` el `TextField` no emite `accepted`) | `UrlInput` captura `Return`/`Enter` con `Keys.onReturnPressed`/`onEnterPressed` + guarda anti-duplicados; y si el enlace ya está analizado, Enter **descarga** |
+| ❌ Enlaces pegados con saltos de línea rompían el análisis | El texto se enviaba tal cual (`trim()` no quita espacios internos) | `UrlInput.cleanUrl()` elimina todo el espacio en blanco antes de enviar |
+| ❌ YouTube/Instagram fallan con "Sign in to confirm you're not a bot" | Servicios que exigen sesión; yt-dlp sin cookies queda bloqueado (limitación ya conocida) | Config `cookies_from_browser` / `cookies_file` + sección **Cookies** en la pestaña Config; el adaptador añade `--cookies-from-browser` / `--cookies` a info, formatos, subtítulos y descargas |
+| ❌ El buffer JSON de la UI podía corromperse y dejar *todas* las respuestas en timeout | Al concatenar un mensaje partido con el siguiente, el buffer nunca volvía a parsear | Si el buffer acumulado ya parece cerrado (o supera 512 KB) se descarta y se registra en Logs |
+| ❌ En la barra lateral el botón **Descargar** quedaba fuera de la pantalla | El preview y los selectores crecían sin límite en un `ColumnLayout` sin margen para encogerse: con ~300 px de alto el botón salía hasta 96 px por debajo | Zona de preview/formato dentro de un `Flickable` acotado (`Layout.minimumHeight` 52/80 y máximo `min(contenido, 60 %/55 % del alto)`) y botón **fuera** de ella: siempre visible (verificado de 160 a 800 px). Además formato y calidad comparten fila (−44 px de alto) |
 
 ### Limitaciones conocidas (de plataformas, no del código)
 
-- **YouTube** puede quedarse colgado en `media.info` si la IP/entorno dispara
-  protección anti-bot: es comportamiento de yt-dlp sin cookies. Solución usual:
-  pasar `--cookies-from-browser` (requiere soporte en el adapter).
+- **YouTube** puede quedar bloqueado en `media.info` o en la descarga si la
+  IP/entorno dispara protección anti-bot (`Sign in to confirm you're not a
+  bot`). Solución implementada: **Config → Cookies (anti-bot)** con
+  `cookies_from_browser` (firefox, chrome, chromium, brave, edge, opera,
+  vivaldi) o `cookies_file` (ruta a `cookies.txt`). El adaptador lo traduce a
+  `--cookies-from-browser` / `--cookies` en todas las llamadas a yt-dlp.
 - **Vimeo** exige login desde 2025+ (`web client only works when logged-in`):
   el provider está limitado a credenciales/cookies.
 - **Cierre de stdin**: el backend hace `process.exit(0)` al recibir EOF en stdin

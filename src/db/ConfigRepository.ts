@@ -79,6 +79,8 @@ export class ConfigRepository {
         ('default_audio_format', 'mp3'),
         ('default_quality', 'auto'),
         ('default_subtitle_languages', 'en,es'),
+        ('cookies_from_browser', ''),
+        ('cookies_file', ''),
         ('theme', 'dark'),
         ('widget_mode', 'tab'),
         ('enable_notifications', 'true')
@@ -107,6 +109,8 @@ export class ConfigRepository {
       defaultAudioFormat: (map.default_audio_format as AudioFormat) || AudioFormat.MP3,
       defaultQuality: (map.default_quality as QualityLevel) || QualityLevel.Auto,
       defaultSubtitleLanguages: (map.default_subtitle_languages || "en,es").split(","),
+      cookiesFromBrowser: map.cookies_from_browser || "",
+      cookiesFile: map.cookies_file || "",
       theme: (map.theme as "dark" | "light") || "dark",
       widgetMode: (map.widget_mode as WidgetMode) || WidgetMode.Tab,
       checkUpdates: true,

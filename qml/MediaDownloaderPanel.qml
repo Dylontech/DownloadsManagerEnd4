@@ -75,6 +75,19 @@ Item {
     property int maxConcurrent: 3
     property bool autoThumbnail: true
     property bool autoSubtitles: false
+    property string cookiesFromBrowser: ""
+    property string cookiesFile: ""
+
+    // ─── Keys ─────────────────────────────────────────────────────────────
+
+    Keys.onPressed: (event) => {
+        if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !urlInput.fieldFocused) {
+            // Enter fuera del campo: descargar si ya hay enlace analizado
+            event.accepted = true;
+            if (root.currentMediaInfo !== null) root.startDownload();
+            else if (urlInput.url.length > 0) urlInput.submitCurrent();
+        }
+    }
 
     // ─── Layout principal ─────────────────────────────────────────────────
 
@@ -112,7 +125,7 @@ Item {
             detecting: root.loading
 
             onSubmit: (url) => {
-                root.analyzeUrl(url);
+                root.submitUrl(url);
             }
         }
 
@@ -124,51 +137,85 @@ Item {
         }
 
         StyledText {
-            Layout.fillWidth: true
-            text: root.lastError
-            color: "#FF5252"
+            Layout.alignment: Qt.AlignHCenter
+            text: Translation.tr("Analyzing link...")
             font.pixelSize: Appearance.font.pixelSize.small
-            visible: root.lastError.length > 0
-            wrapMode: Text.WordWrap
+            color: Appearance.colors.colOnLayer0
+            opacity: 0.7
+            visible: root.loading
         }
 
-        // ─── Preview + Download (when media detected) ─────────────────────
+        ErrorBanner {
+            message: root.lastError
+            hint: root.errorHint(root.lastError)
+        }
 
-        ColumnLayout {
+        // ─── Preview + formato (zona desplazable y acotada) ───────────────
+
+        Flickable {
+            id: mediaScroll
             Layout.fillWidth: true
-            spacing: 8
+            Layout.fillHeight: true
+            Layout.preferredHeight: mediaForm.implicitHeight
+            Layout.minimumHeight: 80
+            Layout.maximumHeight: Math.max(80, Math.min(mediaForm.implicitHeight, root.height * 0.55))
+            visible: root.currentMediaInfo !== null
+            contentHeight: mediaForm.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+
+            ScrollBar.vertical: StyledScrollBar {}
+
+            ColumnLayout {
+                id: mediaForm
+                width: mediaScroll.width
+                spacing: 8
+
+                MediaPreview {
+                    id: mediaPreview
+                    Layout.fillWidth: true
+                    mediaInfo: root.currentMediaInfo
+                    loading: root.loading
+                }
+
+                FormatSelector {
+                    id: formatSelector
+                    Layout.fillWidth: true
+                    formats: root.currentFormats
+                }
+            }
+        }
+
+        // ─── Download (siempre visible, fuera de la zona desplazable) ─────
+
+        RippleButton {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 38
+            buttonRadius: Appearance.rounding.normal
+            buttonColor: Appearance.colors.colPrimary
+            enabled: !root.loading
             visible: root.currentMediaInfo !== null
 
-            MediaPreview {
-                id: mediaPreview
-                Layout.fillWidth: true
-                mediaInfo: root.currentMediaInfo
-                loading: root.loading
-            }
+            RowLayout {
+                anchors.centerIn: parent
+                spacing: 6
 
-            FormatSelector {
-                id: formatSelector
-                Layout.fillWidth: true
-                formats: root.currentFormats
-            }
-
-            RippleButton {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 38
-                buttonRadius: Appearance.rounding.normal
-                buttonColor: Appearance.colors.colPrimary
-                enabled: !root.loading
+                MaterialSymbol {
+                    text: "download"
+                    iconSize: 18
+                    color: "#FFF"
+                }
 
                 StyledText {
-                    anchors.centerIn: parent
                     text: Translation.tr("Download")
                     font.weight: Font.Medium
                     color: "#FFF"
                 }
+            }
 
-                onClicked: {
-                    root.startDownload();
-                }
+            onClicked: {
+                root.startDownload();
             }
         }
 
@@ -338,15 +385,16 @@ Item {
                             width: parent.width
                             spacing: 10
 
-                            // Download path
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 4
+                            // ─── Descargas ────────────────────────────
+                            ConfigSection {
+                                title: Translation.tr("Downloads")
 
                                 StyledText {
+                                    Layout.fillWidth: true
                                     text: Translation.tr("Download Path")
                                     font.pixelSize: Appearance.font.pixelSize.small
                                     color: Appearance.colors.colOnLayer0
+                                    opacity: 0.8
                                 }
 
                                 MaterialTextField {
@@ -357,44 +405,105 @@ Item {
                                         ipc.setConfig("default_download_path", text);
                                     }
                                 }
-                            }
 
-                            // Max concurrent
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 8
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
 
-                                StyledText {
-                                    text: Translation.tr("Max Concurrent")
-                                    font.pixelSize: Appearance.font.pixelSize.small
-                                    color: Appearance.colors.colOnLayer0
+                                    StyledText {
+                                        Layout.fillWidth: true
+                                        text: Translation.tr("Max Concurrent")
+                                        font.pixelSize: Appearance.font.pixelSize.small
+                                        color: Appearance.colors.colOnLayer0
+                                        opacity: 0.8
+                                    }
+
+                                    StyledSpinBox {
+                                        id: concurrentSpin
+                                        from: 1
+                                        to: 10
+                                        value: root.maxConcurrent
+                                        onValueModified: {
+                                            ipc.setConfig("max_concurrent_downloads", String(value));
+                                        }
+                                    }
                                 }
 
-                                StyledSpinBox {
-                                    id: concurrentSpin
-                                    from: 1
-                                    to: 10
-                                    value: root.maxConcurrent
-                                    onValueModified: {
-                                        ipc.setConfig("max_concurrent_downloads", String(value));
+                                ConfigSwitch {
+                                    Layout.fillWidth: true
+                                    text: Translation.tr("Auto-download thumbnails")
+                                    checked: root.autoThumbnail
+                                    onCheckedChanged: {
+                                        ipc.setConfig("auto_download_thumbnail", checked ? "true" : "false");
+                                    }
+                                }
+
+                                ConfigSwitch {
+                                    Layout.fillWidth: true
+                                    text: Translation.tr("Auto-download subtitles")
+                                    checked: root.autoSubtitles
+                                    onCheckedChanged: {
+                                        ipc.setConfig("auto_download_subtitles", checked ? "true" : "false");
                                     }
                                 }
                             }
 
-                            // Toggles
-                            ConfigSwitch {
-                                text: Translation.tr("Auto-download thumbnails")
-                                checked: root.autoThumbnail
-                                onCheckedChanged: {
-                                    ipc.setConfig("auto_download_thumbnail", checked ? "true" : "false");
-                                }
-                            }
+                            // ─── Cookies ──────────────────────────────
+                            ConfigSection {
+                                title: Translation.tr("Cookies (anti-bot)")
 
-                            ConfigSwitch {
-                                text: Translation.tr("Auto-download subtitles")
-                                checked: root.autoSubtitles
-                                onCheckedChanged: {
-                                    ipc.setConfig("auto_download_subtitles", checked ? "true" : "false");
+                                StyledText {
+                                    Layout.fillWidth: true
+                                    text: Translation.tr("Some services ask for a logged-in session. Import the cookies from your browser.")
+                                    font.pixelSize: 10
+                                    color: Appearance.colors.colOnLayer0
+                                    opacity: 0.6
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                StyledComboBox {
+                                    id: cookiesBrowserCombo
+                                    Layout.fillWidth: true
+                                    implicitHeight: 36
+                                    buttonIcon: "cookie"
+                                    model: [
+                                        { text: Translation.tr("Disabled"), value: "" },
+                                        { text: "Firefox", value: "firefox" },
+                                        { text: "Chrome", value: "chrome" },
+                                        { text: "Chromium", value: "chromium" },
+                                        { text: "Brave", value: "brave" },
+                                        { text: "Edge", value: "edge" },
+                                        { text: "Opera", value: "opera" },
+                                        { text: "Vivaldi", value: "vivaldi" },
+                                    ]
+                                    textRole: "text"
+                                    valueRole: "value"
+                                    currentIndex: {
+                                        for (let i = 0; i < model.length; i++) {
+                                            if (model[i].value === root.cookiesFromBrowser) return i;
+                                        }
+                                        return 0;
+                                    }
+                                    onActivated: (index) => {
+                                        const browser = model[index].value;
+                                        root.cookiesFromBrowser = browser;
+                                        // El archivo y el navegador son excluyentes
+                                        root.cookiesFile = "";
+                                        cookiesPathField.text = "";
+                                        ipc.setConfig("cookies_file", "");
+                                        ipc.setConfig("cookies_from_browser", browser);
+                                    }
+                                }
+
+                                MaterialTextField {
+                                    id: cookiesPathField
+                                    Layout.fillWidth: true
+                                    placeholderText: Translation.tr("...or path to cookies.txt")
+                                    text: root.cookiesFile
+                                    onEditingFinished: {
+                                        root.cookiesFile = text;
+                                        ipc.setConfig("cookies_file", text);
+                                    }
                                 }
                             }
 
@@ -522,6 +631,29 @@ Item {
 
     // ─── Funciones ────────────────────────────────────────────────────────
 
+    /**
+     * Enter en el campo: si el enlace ya está analizado se descarga; si no,
+     * se analiza primero.
+     */
+    function submitUrl(url) {
+        if (root.currentMediaInfo !== null && url === root.lastUrl) {
+            root.startDownload();
+        } else {
+            root.analyzeUrl(url);
+        }
+    }
+
+    /**
+     * Pista adicional para los errores de servicios con verificación anti-bot.
+     */
+    function errorHint(message) {
+        const text = String(message ?? "").toLowerCase();
+        if (text.includes("not a bot") || text.includes("cookies") || text.includes("sign in")) {
+            return Translation.tr("Tip: import cookies from your browser in the Config tab.");
+        }
+        return "";
+    }
+
     function analyzeUrl(url) {
         if (!ipc.backendReady) {
             root.lastError = Translation.tr("Backend not ready");
@@ -535,6 +667,11 @@ Item {
 
         ipc.getMediaInfo(url)
             .then((info) => {
+                if (!info) {
+                    root.lastError = Translation.tr("The link returned no information");
+                    root.loading = false;
+                    return;
+                }
                 root.currentMediaInfo = info;
                 root.currentFormats = info.formats ?? [];
                 root.loading = false;
@@ -643,9 +780,98 @@ Item {
                     root.maxConcurrent = config.maxConcurrentDownloads || 3;
                     root.autoThumbnail = config.autoDownloadThumbnail !== false;
                     root.autoSubtitles = config.autoDownloadSubtitles === true;
+                    root.cookiesFromBrowser = config.cookiesFromBrowser || "";
+                    root.cookiesFile = config.cookiesFile || "";
                 }
             })
             .catch(() => {});
+    }
+
+    // ─── Componente interno: sección de configuración ─────────────────────
+
+    component ConfigSection: Rectangle {
+        id: section
+        property string title: ""
+        default property alias sectionContent: sectionColumn.data
+
+        Layout.fillWidth: true
+        implicitHeight: sectionColumn.implicitHeight + 20
+        radius: Appearance.rounding.normal
+        color: Appearance.colors.colLayer2
+
+        ColumnLayout {
+            id: sectionColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 10
+            spacing: 8
+
+            StyledText {
+                Layout.fillWidth: true
+                text: section.title
+                font.pixelSize: Appearance.font.pixelSize.small
+                font.weight: Font.Medium
+                color: Appearance.colors.colOnLayer0
+                opacity: 0.7
+                visible: section.title.length > 0
+            }
+        }
+    }
+
+    // ─── Componente interno: aviso de error ───────────────────────────────
+
+    component ErrorBanner: Rectangle {
+        id: banner
+        property string message: ""
+        property string hint: ""
+
+        Layout.fillWidth: true
+        implicitHeight: content.implicitHeight + 16
+        radius: Appearance.rounding.small
+        color: "#26FF5252"
+        border.width: 1
+        border.color: "#66FF5252"
+        visible: banner.message.length > 0
+
+        RowLayout {
+            id: content
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 8
+            spacing: 8
+
+            MaterialSymbol {
+                Layout.alignment: Qt.AlignTop
+                text: "error"
+                iconSize: 18
+                color: "#FF6B6B"
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                StyledText {
+                    Layout.fillWidth: true
+                    text: banner.message
+                    color: "#FF8A8A"
+                    font.pixelSize: Appearance.font.pixelSize.small
+                    wrapMode: Text.WordWrap
+                }
+
+                StyledText {
+                    Layout.fillWidth: true
+                    text: banner.hint
+                    visible: banner.hint.length > 0
+                    color: "#FFC9C9"
+                    font.pixelSize: 10
+                    wrapMode: Text.WordWrap
+                    opacity: 0.9
+                }
+            }
+        }
     }
 
     // ─── Componente interno para items del historial ──────────────────────

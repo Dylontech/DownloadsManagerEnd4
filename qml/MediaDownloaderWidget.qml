@@ -83,6 +83,11 @@ Item {
         if (event.key === Qt.Key_Escape) {
             urlInput.url = "";
             urlInput.focus = false;
+        } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !urlInput.fieldFocused) {
+            // Enter fuera del campo: descargar si ya hay enlace analizado
+            event.accepted = true;
+            if (root.hasMediaInfo) root.startDownload();
+            else if (urlInput.url.length > 0) urlInput.submitCurrent();
         }
     }
 
@@ -90,6 +95,7 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
+        anchors.margins: 4
         spacing: 10
 
         // ─── Input URL ────────────────────────────────────────────────────
@@ -100,44 +106,77 @@ Item {
             detecting: root.loading
 
             onSubmit: (url) => {
-                root.analyzeUrl(url);
+                root.submitUrl(url);
             }
         }
 
         // ─── Loading indicator ────────────────────────────────────────────
 
-        MaterialLoadingIndicator {
+        RowLayout {
             Layout.alignment: Qt.AlignHCenter
+            Layout.fillWidth: true
+            spacing: 8
             visible: root.loading
+
+            MaterialLoadingIndicator {
+                Layout.alignment: Qt.AlignVCenter
+            }
+
+            StyledText {
+                text: Translation.tr("Analyzing link...")
+                font.pixelSize: Appearance.font.pixelSize.small
+                color: Appearance.colors.colOnLayer0
+                opacity: 0.7
+            }
         }
 
         // ─── Error ────────────────────────────────────────────────────────
 
-        StyledText {
-            Layout.fillWidth: true
-            text: root.lastError
-            color: "#FF5252"
-            font.pixelSize: Appearance.font.pixelSize.small
-            visible: root.lastError.length > 0
-            wrapMode: Text.WordWrap
+        ErrorBanner {
+            message: root.lastError
+            hint: root.errorHint(root.lastError)
         }
 
-        // ─── Preview ──────────────────────────────────────────────────────
+        // ─── Preview + formato (zona desplazable y acotada) ───────────────
+        //
+        // El alto disponible en la barra lateral es pequeño: si el preview y
+        // los selectores crecieran sin límite, empujarían el botón de descarga
+        // fuera de la pantalla. Se les da su alto natural como máximo y, si no
+        // cabe, esta zona se vuelve desplazable.
 
-        MediaPreview {
-            id: mediaPreview
+        Flickable {
+            id: mediaScroll
             Layout.fillWidth: true
-            mediaInfo: root.currentMediaInfo
-            loading: root.loading
-        }
-
-        // ─── Format Selector ──────────────────────────────────────────────
-
-        FormatSelector {
-            id: formatSelector
-            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.preferredHeight: mediaForm.implicitHeight
+            Layout.minimumHeight: 52
+            Layout.maximumHeight: Math.max(52, Math.min(mediaForm.implicitHeight, root.height * 0.6))
             visible: root.hasMediaInfo
-            formats: root.currentFormats
+            contentHeight: mediaForm.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+
+            ScrollBar.vertical: StyledScrollBar {}
+
+            ColumnLayout {
+                id: mediaForm
+                width: mediaScroll.width
+                spacing: 8
+
+                MediaPreview {
+                    id: mediaPreview
+                    Layout.fillWidth: true
+                    mediaInfo: root.currentMediaInfo
+                    loading: root.loading
+                }
+
+                FormatSelector {
+                    id: formatSelector
+                    Layout.fillWidth: true
+                    formats: root.currentFormats
+                }
+            }
         }
 
         // ─── Download Button ──────────────────────────────────────────────
@@ -151,12 +190,22 @@ Item {
             enabled: root.hasMediaInfo && !root.loading
             visible: root.hasMediaInfo
 
-            StyledText {
+            RowLayout {
                 anchors.centerIn: parent
-                text: Translation.tr("Download")
-                font.pixelSize: Appearance.font.pixelSize.normal
-                font.weight: Font.Medium
-                color: "#FFF"
+                spacing: 6
+
+                MaterialSymbol {
+                    text: "download"
+                    iconSize: 18
+                    color: "#FFF"
+                }
+
+                StyledText {
+                    text: Translation.tr("Download")
+                    font.pixelSize: Appearance.font.pixelSize.normal
+                    font.weight: Font.Medium
+                    color: "#FFF"
+                }
             }
 
             onClicked: {
@@ -169,22 +218,43 @@ Item {
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            height: 10
+            Layout.minimumHeight: 0
             visible: root.activeTaskIds.length > 0
 
-            StyledText {
+            RowLayout {
+                id: activeHeader
                 anchors.top: parent.top
                 anchors.left: parent.left
-                text: Translation.tr("Active Downloads")
-                font.pixelSize: Appearance.font.pixelSize.small
-                font.weight: Font.Medium
-                color: Appearance.colors.colOnLayer0
-                opacity: 0.7
+                anchors.right: parent.right
+                spacing: 6
+
+                MaterialSymbol {
+                    text: "downloading"
+                    iconSize: 16
+                    color: Appearance.colors.colOnLayer0
+                    opacity: 0.8
+                }
+
+                StyledText {
+                    Layout.fillWidth: true
+                    text: Translation.tr("Active Downloads")
+                    font.pixelSize: Appearance.font.pixelSize.small
+                    font.weight: Font.Medium
+                    color: Appearance.colors.colOnLayer0
+                    opacity: 0.8
+                }
+
+                StyledText {
+                    text: root.activeTaskIds.length
+                    font.pixelSize: Appearance.font.pixelSize.small
+                    color: Appearance.colors.colOnLayer0
+                    opacity: 0.5
+                }
             }
 
             ListView {
-                anchors.top: parent.top
-                anchors.topMargin: 20
+                anchors.top: activeHeader.bottom
+                anchors.topMargin: 6
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
@@ -213,28 +283,127 @@ Item {
 
             ColumnLayout {
                 anchors.centerIn: parent
-                spacing: 8
+                width: parent.width * 0.9
+                spacing: 10
 
-                MaterialSymbol {
+                Rectangle {
                     Layout.alignment: Qt.AlignHCenter
-                    text: "download_for_offline"
-                    iconSize: 48
-                    color: Appearance.colors.colOnLayer0
-                    opacity: 0.3
+                    Layout.preferredWidth: 76
+                    Layout.preferredHeight: 76
+                    radius: 38
+                    color: Appearance.colors.colLayer1
+
+                    MaterialSymbol {
+                        anchors.centerIn: parent
+                        text: "download_for_offline"
+                        iconSize: 38
+                        color: Appearance.colors.colOnLayer0
+                        opacity: 0.75
+                    }
                 }
 
                 StyledText {
-                    Layout.alignment: Qt.AlignHCenter
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
                     text: Translation.tr("Paste a link to start downloading")
                     font.pixelSize: Appearance.font.pixelSize.normal
                     color: Appearance.colors.colOnLayer0
-                    opacity: 0.4
+                    opacity: 0.8
+                    wrapMode: Text.WordWrap
+                }
+
+                StyledText {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: Translation.tr("YouTube · Twitch · TikTok · Instagram · X · Vimeo · SoundCloud · Bandcamp")
+                    font.pixelSize: Appearance.font.pixelSize.small
+                    color: Appearance.colors.colOnLayer0
+                    opacity: 0.45
+                    wrapMode: Text.WordWrap
+                }
+            }
+        }
+    }
+
+    // ─── Componente interno: aviso de error ───────────────────────────────
+
+    component ErrorBanner: Rectangle {
+        id: banner
+        property string message: ""
+        property string hint: ""
+
+        Layout.fillWidth: true
+        implicitHeight: content.implicitHeight + 16
+        radius: Appearance.rounding.small
+        color: "#26FF5252"
+        border.width: 1
+        border.color: "#66FF5252"
+        visible: banner.message.length > 0
+
+        RowLayout {
+            id: content
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 8
+            spacing: 8
+
+            MaterialSymbol {
+                Layout.alignment: Qt.AlignTop
+                text: "error"
+                iconSize: 18
+                color: "#FF6B6B"
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                StyledText {
+                    Layout.fillWidth: true
+                    text: banner.message
+                    color: "#FF8A8A"
+                    font.pixelSize: Appearance.font.pixelSize.small
+                    wrapMode: Text.WordWrap
+                }
+
+                StyledText {
+                    Layout.fillWidth: true
+                    text: banner.hint
+                    visible: banner.hint.length > 0
+                    color: "#FFC9C9"
+                    font.pixelSize: 10
+                    wrapMode: Text.WordWrap
+                    opacity: 0.9
                 }
             }
         }
     }
 
     // ─── Funciones ────────────────────────────────────────────────────────
+
+    /**
+     * Enter en el campo: si el enlace ya está analizado se descarga; si no,
+     * se analiza primero.
+     */
+    function submitUrl(url) {
+        if (root.currentMediaInfo !== null && url === root.lastUrl) {
+            root.startDownload();
+        } else {
+            root.analyzeUrl(url);
+        }
+    }
+
+    /**
+     * Pista adicional para los errores de servicios con verificación anti-bot.
+     */
+    function errorHint(message) {
+        const text = String(message ?? "").toLowerCase();
+        if (text.includes("not a bot") || text.includes("cookies") || text.includes("sign in")) {
+            return Translation.tr("Tip: import cookies from your browser in the Config tab.");
+        }
+        return "";
+    }
 
     function analyzeUrl(url) {
         if (!ipc.backendReady) {
@@ -249,6 +418,11 @@ Item {
 
         ipc.getMediaInfo(url)
             .then((info) => {
+                if (!info) {
+                    root.lastError = Translation.tr("The link returned no information");
+                    root.loading = false;
+                    return;
+                }
                 root.currentMediaInfo = info;
                 root.currentFormats = info.formats ?? [];
                 root.loading = false;

@@ -19,7 +19,7 @@ export interface QueueEvents {
 export class DownloadQueue extends EventEmitter {
   private tasks: Map<string, DownloadTask> = new Map();
   private queueOrder: string[] = [];
-  private activeCount = 0;
+  private activeTaskIds: Set<string> = new Set();
   private maxConcurrent: number;
   private ytDlpAdapter: YtDlpAdapter;
 
@@ -28,6 +28,10 @@ export class DownloadQueue extends EventEmitter {
     this.ytDlpAdapter = ytDlpAdapter;
     this.maxConcurrent = maxConcurrent;
     this.setupAdapterListeners();
+  }
+
+  private releaseSlot(taskId: string): void {
+    this.activeTaskIds.delete(taskId);
   }
 
   private setupAdapterListeners(): void {
@@ -40,35 +44,41 @@ export class DownloadQueue extends EventEmitter {
     });
 
     this.ytDlpAdapter.on("completed", ({ taskId, filePath, fileSize }) => {
+      this.releaseSlot(taskId);
       const task = this.tasks.get(taskId);
       if (task) {
+        const previous = task.status;
         task.status = TaskStatus.Completed;
         task.completedAt = Date.now();
         task.filePath = filePath;
         task.fileSize = fileSize;
         task.progress = { ...task.progress, percent: 100 };
-        this.activeCount--;
-        this.emit("task.status", taskId, TaskStatus.Completed, TaskStatus.Running);
+        this.emit("task.status", taskId, TaskStatus.Completed, previous);
         this.processNext();
       }
     });
 
     this.ytDlpAdapter.on("error", ({ taskId, error }) => {
+      this.releaseSlot(taskId);
       const task = this.tasks.get(taskId);
-      if (task) {
-        task.status = TaskStatus.Failed;
-        task.error = error;
-        task.retries++;
-        this.activeCount--;
+      if (!task) return;
 
-        // Reintentar si es posible
-        if (task.retries < task.maxRetries) {
-          this.retryTask(task);
-        } else {
-          this.emit("task.status", taskId, TaskStatus.Failed, TaskStatus.Running);
-          this.emit("queue.error", taskId, error);
-          this.processNext();
-        }
+      // Descarga cancelada o eliminada a propósito: no reintentar,
+      // de lo contrario se reiniciaría sola y dejaría el archivo a medias.
+      if (task.status === TaskStatus.Cancelled) return;
+
+      const previous = task.status;
+      task.status = TaskStatus.Failed;
+      task.error = error;
+      task.retries++;
+
+      // Reintentar si es posible
+      if (task.retries < task.maxRetries) {
+        this.retryTask(task, previous);
+      } else {
+        this.emit("task.status", taskId, TaskStatus.Failed, previous);
+        this.emit("queue.error", taskId, error);
+        this.processNext();
       }
     });
   }
@@ -88,13 +98,19 @@ export class DownloadQueue extends EventEmitter {
     const task = this.tasks.get(taskId);
     if (!task) return false;
 
-    if (task.status === TaskStatus.Running) {
+    const wasActive = this.activeTaskIds.has(taskId);
+    if (wasActive) {
       this.ytDlpAdapter.cancelDownload(taskId);
     }
 
     this.tasks.delete(taskId);
     this.queueOrder = this.queueOrder.filter((id) => id !== taskId);
+    this.releaseSlot(taskId);
     this.emit("task.removed", taskId);
+
+    if (wasActive) {
+      this.processNext();
+    }
     return true;
   }
 
@@ -127,16 +143,28 @@ export class DownloadQueue extends EventEmitter {
   cancel(taskId: string): boolean {
     const task = this.tasks.get(taskId);
     if (!task) return false;
+    if (
+      task.status === TaskStatus.Completed ||
+      task.status === TaskStatus.Failed ||
+      task.status === TaskStatus.Cancelled
+    ) {
+      return false;
+    }
 
-    const cancelled = this.ytDlpAdapter.cancelDownload(taskId);
-    if (cancelled) {
-      const prev = task.status;
-      task.status = TaskStatus.Cancelled;
-      this.activeCount--;
-      this.emit("task.status", taskId, TaskStatus.Cancelled, prev);
+    const wasActive = this.activeTaskIds.has(taskId);
+    if (wasActive) {
+      this.ytDlpAdapter.cancelDownload(taskId);
+    }
+
+    const prev = task.status;
+    task.status = TaskStatus.Cancelled;
+    this.releaseSlot(taskId);
+    this.emit("task.status", taskId, TaskStatus.Cancelled, prev);
+
+    if (wasActive) {
       this.processNext();
     }
-    return cancelled;
+    return true;
   }
 
   // ─── Consultas ─────────────────────────────────────────────────────────
@@ -180,6 +208,10 @@ export class DownloadQueue extends EventEmitter {
     return this.tasks.size;
   }
 
+  get activeCount(): number {
+    return this.activeTaskIds.size;
+  }
+
   setMaxConcurrent(max: number): void {
     this.maxConcurrent = max;
     this.processNext();
@@ -188,16 +220,16 @@ export class DownloadQueue extends EventEmitter {
   // ─── Procesamiento Interno ─────────────────────────────────────────────
 
   private processNext(): void {
-    while (this.activeCount < this.maxConcurrent) {
+    while (this.activeTaskIds.size < this.maxConcurrent) {
       const nextTask = this.findNextQueued();
       if (!nextTask) {
-        if (this.activeCount === 0 && this.size === 0) {
+        if (this.activeTaskIds.size === 0 && this.size === 0) {
           this.emit("queue.drained");
         }
         return;
       }
 
-      this.activeCount++;
+      this.activeTaskIds.add(nextTask.id);
       const prev = nextTask.status;
       nextTask.status = TaskStatus.Running;
       nextTask.startedAt = Date.now();
@@ -217,10 +249,10 @@ export class DownloadQueue extends EventEmitter {
     return undefined;
   }
 
-  private retryTask(task: DownloadTask): void {
+  private retryTask(task: DownloadTask, previous: TaskStatus): void {
     task.status = TaskStatus.Queued;
     task.error = undefined;
-    this.emit("task.status", task.id, TaskStatus.Queued, TaskStatus.Failed);
+    this.emit("task.status", task.id, TaskStatus.Queued, previous);
     this.processNext();
   }
 
@@ -231,7 +263,7 @@ export class DownloadQueue extends EventEmitter {
     this.ytDlpAdapter.killAll();
     this.tasks.clear();
     this.queueOrder = [];
-    this.activeCount = 0;
+    this.activeTaskIds.clear();
     this.removeAllListeners();
   }
 }

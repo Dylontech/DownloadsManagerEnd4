@@ -355,14 +355,11 @@ EOF
         log_warn "No se encontró BottomWidgetGroup.qml — la pestaña del sidebar no se añadió"
     fi
 
-    # 5e — Traducciones en español (crear solo si no existe el override del usuario)
+    # 5e — Traducciones en español (claves por defecto + merge sin pisar al usuario)
     TRANSLATIONS_DIR="${HOME}/.config/illogical-impulse/translations"
     TRANSLATIONS_FILE="${TRANSLATIONS_DIR}/es_MX.json"
-    if [ -f "$TRANSLATIONS_FILE" ]; then
-        log_ok "Override de traducciones ya existe (respetado): ${TRANSLATIONS_FILE}"
-    else
-        mkdir -p "$TRANSLATIONS_DIR"
-        cat > "$TRANSLATIONS_FILE" <<'EOF'
+    TRANSLATIONS_DEFAULTS="$(mktemp)"
+    cat > "$TRANSLATIONS_DEFAULTS" <<'EOF'
 {
   "Media Download Center": "Centro de Descargas",
   "Downloads": "Descargas",
@@ -379,11 +376,45 @@ EOF
   "Search history...": "Buscar en historial...",
   "Backend not ready. Please wait...": "Backend no listo. Espera...",
   "Failed to analyze URL": "No se pudo analizar el enlace",
-  "Failed to start download": "No se pudo iniciar la descarga"
+  "Failed to start download": "No se pudo iniciar la descarga",
+  "Analyzing link...": "Analizando enlace...",
+  "The link returned no information": "El enlace no devolvió información",
+  "Download Path": "Ruta de descarga",
+  "Max Concurrent": "Descargas simultáneas",
+  "Auto-download thumbnails": "Descargar miniaturas",
+  "Auto-download subtitles": "Descargar subtítulos",
+  "Cookies (anti-bot)": "Cookies (anti-bot)",
+  "Some services ask for a logged-in session. Import the cookies from your browser.": "Algunos servicios piden una sesión iniciada. Importa las cookies de tu navegador.",
+  "Disabled": "Desactivado",
+  "...or path to cookies.txt": "…o ruta a cookies.txt",
+  "Tip: import cookies from your browser in the Config tab.": "Consejo: importa las cookies de tu navegador en la pestaña Configuración."
 }
 EOF
+
+    if [ -f "$TRANSLATIONS_FILE" ]; then
+        # Merge idempotente: añade solo las claves que falten
+        if node -e '
+            const fs = require("fs");
+            const [targetFile, defaultsFile] = process.argv.slice(1);
+            const target = JSON.parse(fs.readFileSync(targetFile, "utf8"));
+            const defaults = JSON.parse(fs.readFileSync(defaultsFile, "utf8"));
+            let added = 0;
+            for (const [key, value] of Object.entries(defaults)) {
+                if (!(key in target)) { target[key] = value; added++; }
+            }
+            if (added > 0) fs.writeFileSync(targetFile, JSON.stringify(target, null, 2) + "\n");
+            console.log(added);
+        ' "$TRANSLATIONS_FILE" "$TRANSLATIONS_DEFAULTS" >/dev/null 2>&1; then
+            log_ok "Traducciones ES actualizadas (se respetaron las tuyas): ${TRANSLATIONS_FILE}"
+        else
+            log_warn "No se pudieron fusionar las traducciones en ${TRANSLATIONS_FILE}"
+        fi
+    else
+        mkdir -p "$TRANSLATIONS_DIR"
+        cp "$TRANSLATIONS_DEFAULTS" "$TRANSLATIONS_FILE"
         log_ok "Traducciones ES creadas → ${TRANSLATIONS_FILE}"
     fi
+    rm -f "$TRANSLATIONS_DEFAULTS"
 
     log_ok "Integración completada. Accesos:"
     echo -e "     ${BLUE}Sidebar derecho → pestaña «Descargas»${NC}"

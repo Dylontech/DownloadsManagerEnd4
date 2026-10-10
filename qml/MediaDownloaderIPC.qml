@@ -41,6 +41,9 @@ Scope {
     property var logBuffer: []
     property int maxLogs: 200
 
+    // Presupuesto de espera por request (yt-dlp puede tardar ~45s en analizar)
+    property int requestTimeout: 75000
+
     function addLog(message, type) {
         const entry = {
             time: new Date().toLocaleTimeString(),
@@ -123,11 +126,11 @@ Scope {
         if (!line) return;
 
         // Acumular en buffer (por si llegaron fragmentos)
-        root.lineBuffer += line;
+        const pending = root.lineBuffer + line;
 
         // Intentar parsear como JSON
         try {
-            const msg = JSON.parse(root.lineBuffer);
+            const msg = JSON.parse(pending);
             root.lineBuffer = ""; // Limpiar buffer
 
             if (msg.jsonrpc !== "2.0") return;
@@ -143,8 +146,15 @@ Scope {
                 root.handleNotification(msg);
             }
         } catch (e) {
-            // JSON incompleto, esperar más datos
-            // El buffer se mantiene
+            // JSON incompleto, esperar más datos. Si el buffer ya parece
+            // cerrado (o es enorme) está corrupto: descartarlo, no vaya a
+            // bloquear todas las respuestas siguientes.
+            if (pending.endsWith("}") || pending.length > 512 * 1024) {
+                root.lineBuffer = "";
+                root.addLog("Respuesta IPC ilegible descartada", "warn");
+            } else {
+                root.lineBuffer = pending;
+            }
         }
     }
 
@@ -172,9 +182,11 @@ Scope {
 
             root.pendingRequests[id] = { resolve, reject };
 
-            // Timeout de 30s
+            // El backend puede tardar hasta 45s analizando un enlace con
+            // yt-dlp; el cliente debe esperar más para recibir el error real
+            // en vez de un "timed out" genérico.
             const timer = Qt.createQmlObject(
-                "import QtQuick; Timer { interval: 30000; repeat: false; onTriggered: {}}",
+                `import QtQuick; Timer { interval: ${root.requestTimeout}; repeat: false; onTriggered: {}}`,
                 root
             );
             timer.triggered.connect(() => {

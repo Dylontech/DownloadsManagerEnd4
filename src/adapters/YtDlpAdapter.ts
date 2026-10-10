@@ -32,16 +32,52 @@ export interface ErrorEvent {
   exitCode: number | null;
 }
 
+/**
+ * Cookies para yt-dlp. Algunos servicios (YouTube, Instagram, Vimeo) exigen
+ * sesión iniciada y responden con "Sign in to confirm you're not a bot".
+ */
+export interface CookieOptions {
+  /** Navegador del que importar las cookies: firefox, chrome, chromium, brave, edge, opera, vivaldi */
+  fromBrowser?: string;
+  /** Ruta a un archivo cookies.txt (formato Netscape). Tiene prioridad sobre el navegador */
+  file?: string;
+}
+
 // ─── Constantes ────────────────────────────────────────────────────────────
 
 const YT_DLP_BIN = "yt-dlp";
-const DEFAULT_TIMEOUT = 30_000; // 30s para info extraction
+const DEFAULT_TIMEOUT = 45_000; // 45s para info extraction (el cliente espera 75s)
 const DOWNLOAD_TIMEOUT = 0; // Sin timeout para descargas largas
+const SOCKET_TIMEOUT = 15; // yt-dlp: aborta conexiones que se quedan colgadas
+
+// Marcador literal de las líneas de progreso (ver --progress-template)
+const PROGRESS_PREFIX = "progress:";
+const FILEPATH_PREFIX = "filepath:";
 
 // ─── Adapter ───────────────────────────────────────────────────────────────
 
 export class YtDlpAdapter extends EventEmitter {
   private activeProcesses: Map<string, ChildProcess> = new Map();
+  private cookies: CookieOptions = {};
+
+  // ─── Cookies ───────────────────────────────────────────────────────────
+
+  /**
+   * Configura las cookies usadas por todas las invocaciones de yt-dlp.
+   * Vacío = sin cookies (comportamiento por defecto).
+   */
+  setCookieOptions(options: CookieOptions): void {
+    this.cookies = {
+      fromBrowser: options.fromBrowser?.trim() || undefined,
+      file: options.file?.trim() || undefined,
+    };
+  }
+
+  private cookieArgs(): string[] {
+    if (this.cookies.file) return ["--cookies", this.cookies.file];
+    if (this.cookies.fromBrowser) return ["--cookies-from-browser", this.cookies.fromBrowser];
+    return [];
+  }
 
   // ─── Extraer Información ───────────────────────────────────────────────
 
@@ -56,15 +92,17 @@ export class YtDlpAdapter extends EventEmitter {
     const args = [
       "--no-warnings",
       "--no-progress",
+      "--socket-timeout", String(SOCKET_TIMEOUT),
       "--dump-json",
       "--no-download",
       "--skip-download",
       "--ignore-errors",
+      ...this.cookieArgs(),
       url,
     ];
 
     const result = await this.execYtDlp(args, timeout);
-    const data = JSON.parse(result);
+    const data = this.parseJsonOutput(result);
 
     return this.mapToMediaInfo(data, url);
   }
@@ -78,18 +116,21 @@ export class YtDlpAdapter extends EventEmitter {
   startDownload(task: DownloadTask): string {
     const { options } = task;
 
-    // Obtener argumentos específicos del provider (si el provider existe en el task)
-    const providerArgs: string[] = [];
-
     // Argumentos base
     const args: string[] = [
       "--no-warnings",
       "--newline",
+      // --print implica --quiet y en modo silencioso yt-dlp no imprime el
+      // progreso: sin --progress la UI nunca recibe actualizaciones.
+      "--progress",
       "--progress-template",
-      "download:%(progress._percent)s|%(progress._speed_bytes_per_second)s|%(progress._eta)s|%(progress._downloaded_bytes)s|%(progress._total_bytes_estimate)s|%(progress._speed)s|%(progress._total_bytes)s",
+      // El prefijo antes del primer ":" es el TIPO de plantilla (no se imprime).
+      // Por eso el literal "progress:" va dentro de la plantilla: es lo único
+      // que permite distinguir el progreso del resto de líneas de stdout.
+      "download:progress:%(progress._percent)s|%(progress._speed_bytes_per_second)s|%(progress._eta)s|%(progress._downloaded_bytes)s|%(progress._total_bytes_estimate)s|%(progress._speed_str)s|%(progress._total_bytes)s",
       "--print",
       "after_move:filepath:%(filepath)s",
-      ...providerArgs,
+      ...this.cookieArgs(),
       ...this.buildCommonArgs(options),
       options.url,
     ];
@@ -104,17 +145,25 @@ export class YtDlpAdapter extends EventEmitter {
 
     let stderrBuffer = "";
     let stdoutBuffer = "";
+    let pendingLine = "";
     let filePath = "";
 
     process.stdout?.on("data", (chunk: Buffer) => {
-      const lines = chunk.toString().split("\n");
+      const text = chunk.toString();
+      stdoutBuffer += text;
+
+      // Los fragmentos no respetan los saltos de línea: solo procesar
+      // líneas completas y guardar el resto para el siguiente fragmento.
+      const lines = (pendingLine + text).split("\n");
+      pendingLine = lines.pop() ?? "";
+
       for (const line of lines) {
-        if (line.startsWith("filepath:")) {
-          filePath = line.slice(9).trim();
+        if (line.startsWith(FILEPATH_PREFIX)) {
+          filePath = line.slice(FILEPATH_PREFIX.length).trim();
           continue;
         }
-        if (line.startsWith("download:")) {
-          const progress = this.parseProgressLine(line.slice(9), taskId);
+        if (line.startsWith(PROGRESS_PREFIX)) {
+          const progress = this.parseProgressLine(line.slice(PROGRESS_PREFIX.length), taskId);
           if (progress) {
             this.emit("progress", { taskId, progress } as ProgressEvent);
           }
@@ -128,6 +177,11 @@ export class YtDlpAdapter extends EventEmitter {
 
     process.on("close", (exitCode) => {
       this.activeProcesses.delete(taskId);
+
+      // Última línea sin salto final
+      if (pendingLine.startsWith(FILEPATH_PREFIX)) {
+        filePath = pendingLine.slice(FILEPATH_PREFIX.length).trim();
+      }
 
       if (exitCode === 0) {
         // Buscar el path del archivo descargado
@@ -158,6 +212,9 @@ export class YtDlpAdapter extends EventEmitter {
     const process = this.activeProcesses.get(taskId);
     if (!process) return false;
 
+    // Un proceso detenido con SIGSTOP (pausa) no procesa SIGTERM:
+    // hay que reanudarlo primero o quedaría vivo escribiendo el .part.
+    process.kill("SIGCONT");
     process.kill("SIGTERM");
     setTimeout(() => {
       if (this.activeProcesses.has(taskId)) {
@@ -191,14 +248,17 @@ export class YtDlpAdapter extends EventEmitter {
 
     const args = [
       "--no-warnings",
+      "--no-progress",
+      "--socket-timeout", String(SOCKET_TIMEOUT),
       "-J",
       "--no-download",
       "--skip-download",
+      ...this.cookieArgs(),
       url,
     ];
 
     const result = await this.execYtDlp(args, DEFAULT_TIMEOUT);
-    const data = JSON.parse(result);
+    const data = this.parseJsonOutput(result);
     return (data.formats ?? []).map((f: any) => this.mapFormat(f));
   }
 
@@ -209,9 +269,12 @@ export class YtDlpAdapter extends EventEmitter {
 
     const args = [
       "--no-warnings",
+      "--no-progress",
+      "--socket-timeout", String(SOCKET_TIMEOUT),
       "--list-subs",
       "--skip-download",
       "--no-download",
+      ...this.cookieArgs(),
       url,
     ];
 
@@ -245,7 +308,14 @@ export class YtDlpAdapter extends EventEmitter {
   // ─── Limpieza ──────────────────────────────────────────────────────────
 
   killAll(): void {
-    for (const [id, process] of this.activeProcesses) {
+    const taskIds = [...this.activeProcesses.keys()];
+    for (const id of taskIds) {
+      const process = this.activeProcesses.get(id);
+      if (!process) continue;
+
+      // Reanudar antes de terminar: los procesos en pausa (SIGSTOP)
+      // ignorarían SIGTERM y quedarían huérfanos.
+      process.kill("SIGCONT");
       process.kill("SIGTERM");
       setTimeout(() => {
         if (this.activeProcesses.has(id)) {
@@ -253,7 +323,6 @@ export class YtDlpAdapter extends EventEmitter {
         }
       }, 2000);
     }
-    this.activeProcesses.clear();
   }
 
   get activeCount(): number {
@@ -264,6 +333,7 @@ export class YtDlpAdapter extends EventEmitter {
 
   private execYtDlp(args: string[], timeout: number): Promise<string> {
     return new Promise((resolve, reject) => {
+      const startedAt = Date.now();
       const process = spawn(YT_DLP_BIN, args, {
         stdio: ["ignore", "pipe", "pipe"],
         timeout,
@@ -280,18 +350,45 @@ export class YtDlpAdapter extends EventEmitter {
         stderr += chunk.toString();
       });
 
-      process.on("close", (exitCode) => {
+      process.on("close", (exitCode, signal) => {
         if (exitCode === 0) {
           resolve(stdout);
-        } else {
-          reject(new Error(this.parseError(stderr, exitCode)));
+          return;
         }
+        // El timeout de spawn mata el proceso con SIGTERM: sin esto el
+        // usuario vería un críptico "Exit code: null".
+        if (signal === "SIGTERM" && Date.now() - startedAt >= timeout - 100) {
+          reject(new Error(`yt-dlp no respondió en ${Math.round(timeout / 1000)}s (tiempo de espera agotado)`));
+          return;
+        }
+        reject(new Error(this.parseError(stderr, exitCode)));
       });
 
       process.on("error", (err) => {
         reject(new Error(`Failed to spawn yt-dlp: ${err.message}`));
       });
     });
+  }
+
+  /**
+   * Parsea el JSON de yt-dlp con un mensaje entendible cuando no hay salida.
+   */
+  private parseJsonOutput(raw: string): any {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      throw new Error("yt-dlp no devolvió información del enlace (¿no disponible, privado o bloqueado por el servicio?)");
+    }
+
+    const jsonStart = trimmed.indexOf("{");
+    if (jsonStart < 0) {
+      throw new Error("Respuesta inesperada de yt-dlp al analizar el enlace");
+    }
+
+    try {
+      return JSON.parse(trimmed.slice(jsonStart));
+    } catch {
+      throw new Error("Respuesta inesperada de yt-dlp al analizar el enlace");
+    }
   }
 
   private buildCommonArgs(options: Record<string, any>): string[] {
@@ -448,16 +545,19 @@ export class YtDlpAdapter extends EventEmitter {
   }
 
   private parseError(stderr: string, exitCode: number | null): string {
-    const lines = stderr.split("\n").filter((l) => l.trim());
-    // Buscar líneas de error relevantes
-    const errorLines = lines.filter(
-      (l) =>
-        l.includes("ERROR:") ||
-        l.includes("Error:") ||
-        l.includes("WARNING:") === false
-    );
-    const lastError = errorLines[errorLines.length - 1] || `Exit code: ${exitCode}`;
-    return lastError.trim();
+    const lines = stderr
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    // yt-dlp imprime el motivo real en la línea "ERROR: ..."; el resto
+    // (avisos, trazas) solo añade ruido al mensaje que ve el usuario.
+    const errorLine = lines.find((l) => l.includes("ERROR:"));
+    if (errorLine) {
+      return errorLine.replace(/^ERROR:\s*/, "");
+    }
+
+    return lines[lines.length - 1] ?? `Exit code: ${exitCode}`;
   }
 
   private formatEta(seconds: number): string {

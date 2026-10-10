@@ -14,9 +14,15 @@ Item {
 
     property alias url: urlField.text
     property bool detecting: false
+    readonly property bool fieldFocused: urlField.activeFocus
     property string detectedProvider: ""
     property string detectedProviderIcon: "search"
     property string detectedProviderColor: "#888"
+
+    // Evita enviar dos veces el mismo enlace (accepted + Return pueden
+    // llegar en algunas versiones de Qt)
+    property string lastSubmitted: ""
+    property double lastSubmittedAt: 0
 
     signal submit(string url)
     signal providerDetected(string provider)
@@ -33,6 +39,29 @@ Item {
 
     function pasteFromClipboard() {
         urlField.paste();
+        urlField.text = root.cleanUrl(urlField.text);
+    }
+
+    /**
+     * Al pegar, el enlace suele traer saltos de línea o espacios: yt-dlp
+     * recibiría una URL partida y fallaría.
+     */
+    function cleanUrl(raw) {
+        return String(raw ?? "").replace(/\s+/g, "");
+    }
+
+    /**
+     * Envía el enlace escrito. Se usa tanto desde `accepted` como desde las
+     * teclas Return/Enter.
+     */
+    function submitCurrent() {
+        const url = root.cleanUrl(urlField.text);
+        if (url.length === 0) return;
+        if (url === root.lastSubmitted && Date.now() - root.lastSubmittedAt < 500) return;
+
+        root.lastSubmitted = url;
+        root.lastSubmittedAt = Date.now();
+        root.submit(url);
     }
 
     RowLayout {
@@ -78,9 +107,19 @@ Item {
             }
 
             onAccepted: {
-                if (text.length > 0) {
-                    root.submit(text.trim());
-                }
+                root.submitCurrent();
+            }
+
+            // `accepted` no siempre se emite (cualquier manejador Keys en la
+            // cadena consume la tecla), así que Enter se captura aquí.
+            Keys.onReturnPressed: (event) => {
+                event.accepted = true;
+                root.submitCurrent();
+            }
+
+            Keys.onEnterPressed: (event) => {
+                event.accepted = true;
+                root.submitCurrent();
             }
 
             Keys.onPressed: (event) => {
@@ -110,6 +149,7 @@ Item {
 
             onClicked: {
                 urlField.paste();
+                urlField.text = root.cleanUrl(urlField.text);
             }
         }
 
@@ -120,6 +160,7 @@ Item {
             buttonRadius: height / 2
             buttonColor: root.detectedProviderColor !== "#888" ? root.detectedProviderColor : Appearance.colors.colPrimary
             enabled: urlField.text.trim().length > 0
+            opacity: enabled ? 1 : 0.5
 
             MaterialSymbol {
                 anchors.centerIn: parent
@@ -133,9 +174,7 @@ Item {
             }
 
             onClicked: {
-                if (urlField.text.trim().length > 0) {
-                    root.submit(urlField.text.trim());
-                }
+                root.submitCurrent();
             }
         }
     }
