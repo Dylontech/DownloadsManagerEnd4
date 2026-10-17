@@ -6,6 +6,41 @@
 
 ---
 
+## ⚠️ Cambio de arquitectura en la v1.1: el backend es un DEMONIO
+
+Hasta la v1.0 el backend Node era un **proceso hijo del panel**: cada UI
+instanciaba su propio `MediaDownloaderIPC`, y dentro había un
+`Process { running: true }`. Al cerrar la barra lateral (o al cambiar de pestaña
+en el `BottomWidgetGroup`) QuickShell destruía ese componente, mataba el proceso
+Node y, con él, los `yt-dlp` en curso. Eran además **dos o tres backends
+simultáneos**, con dos colas independientes sobre la misma SQLite.
+
+Desde la v1.1 el reparto es:
+
+| | Proceso | Vive en | Se conecta |
+|---|---|---|---|
+| **Backend** | `node dist/index.js --daemon` | `media-download-center.service` (systemd --user) | Escucha en `$XDG_RUNTIME_DIR/media-download-center.sock` |
+| **Frontend** | QuickShell | Config `ii` | `MediaDownloaderIPC` (singleton) abre un `Socket` |
+
+Consecuencias prácticas:
+
+- **Cerrar la barra lateral, cambiar de pestaña o recargar QuickShell NO
+  interrumpe las descargas**: el demonio no es hijo de nadie y sigue trabajando
+  sin ningún cliente conectado.
+- **Un solo backend**: el widget del sidebar y el panel flotante ven la misma
+  cola (antes cada uno tenía la suya).
+- **Reanudación**: la cola se persiste en la tabla `persistent_queue` y, al
+  arrancar el demonio, las tareas que quedaron en curso se re-encolan y yt-dlp
+  continúa el `.part` (`--continue`).
+- **La notificación `server.ready` se emite en cada conexión nueva**: es la
+  señal que usa la UI para volver a pedir el estado (no se guarda nada en QML).
+
+El transporte está abstraído en `src/ipc/Transport.ts` con dos
+implementaciones: `StdioTransport` (compatibilidad con `npm start` y el smoke
+test del instalador) y `SocketTransport` (el demonio).
+
+---
+
 ## 1. Vista general
 
 ```
@@ -77,17 +112,19 @@ flowchart TB
     Y -- "descarga archivos" --> OUT["~/Descargas/MediaDownloadCenter"]
 ```
 
-**Principio clave del IPC**: las *requests* van de QML → backend por **stdin**
-(`process.write()`), y las *responses* + *notificaciones* vuelven por **stderr**
-(el stdout queda reservado para logs de yt-dlp). Por eso el backend escribe un
-heartbeat `HEARTBEAT` a stderr cada 5 s y el QML ignora toda línea que no
-empiece por `{`.
+**Principio clave del IPC**: hay **un solo demonio** y varios clientes posibles.
+Los requests y las respuestas viajan como JSON-RPC delimitado por saltos de
+línea a través de un **socket Unix**; el servidor difunde las notificaciones
+(*broadcast*) a todos los clientes conectados y responde solo al que hizo la
+petición. El modo histórico por **stdin/stderr** (`--stdio`) se conserva para
+`npm start` y para el smoke test del instalador, y ahí el QML ignoraba toda
+línea que no empezara por `{` (heartbeat `HEARTBEAT`, trazas de yt-dlp).
 
 ---
 
 ## 2. Protocolo JSON-RPC 2.0 — mapa completo
 
-### 2.1 Requests (QML → backend, por stdin)
+### 2.1 Requests (QML → demonio, por socket Unix)
 
 | Grupo | Método | Qué hace | Probado |
 |-------|--------|----------|:-------:|
@@ -112,7 +149,7 @@ empiece por `{`.
 | Sistema | `system.status` | Cola activa, providers, historial, dataDir | ✅ |
 | Sistema | `system.clearCompleted` | Limpiar completadas de la cola |
 
-### 2.2 Responses y notificaciones (backend → QML, por stderr)
+### 2.2 Responses y notificaciones (demonio → QML, por el mismo socket)
 
 | Mensaje | Contenido | Consumo en QML |
 |---------|------------|----------------|
@@ -281,11 +318,16 @@ qs -c ii ipc call mediaDownloader show       # solo abrir
 qs -c ii ipc call mediaDownloader hide       # solo cerrar
 ```
 
-Atajo de teclado en `hyprland.conf`:
+Atajo de teclado (Hyprland en Lua → `~/.config/hypr/custom/keybinds.lua`):
 
-```ini
-bind = SUPER, D, exec, qs -c ii ipc call mediaDownloader toggle
+```lua
+hl.bind("CTRL + SUPER + D", hl.dsp.global("quickshell:mediaDownloaderFloatingToggle"),
+    { description = "Shell: Toggle media downloader" })
 ```
+
+> ⚠️ `SUPER + D` está ocupado por «Window: Maximize» en
+> `~/.config/hypr/hyprland/keybinds.lua`, y `~/.config/hypr/hyprland.conf` no
+> existe en esta instalación (la config es Lua).
 
 ### Recargar tras cambios
 

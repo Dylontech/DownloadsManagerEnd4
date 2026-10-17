@@ -18,42 +18,33 @@ Item {
     id: root
 
     // ─── IPC ──────────────────────────────────────────────────────────────
+    //
+    // Alias al singleton compartido: NO se instancia un backend por widget.
+    // Antes cada UI creaba su propio proceso Node, y al desmontarse el widget
+    // (cerrar el sidebar o cambiar de pestaña) se llevaba por delante las
+    // descargas que estaban en curso.
 
-    MediaDownloaderIPC {
-        id: ipc
-        onBackendReadyChanged: {
-            if (ipc.backendReady) {
-                console.log("[MediaDownloader] Backend ready");
-                root.refreshDownloads();
-                root.backendRetryTimer.stop();
-            }
-        }
+    readonly property var ipc: MediaDownloaderIPC
 
-        onServerReady: {
-            console.log("[MediaDownloader] Server signaled ready");
-        }
+    Connections {
+        target: MediaDownloaderIPC
 
-        onDownloadProgress: (taskId, progress) => {
-            root.updateTaskProgress(taskId, progress);
-        }
-
-        onDownloadStatus: (taskId, status, previous) => {
-            root.handleStatusChange(taskId, status, previous);
-        }
-
-        onDownloadCompleted: (taskId, info) => {
+        function onDownloadCompleted(taskId, info) {
             console.log("[MediaDownloader] Download completed:", taskId, info?.title);
         }
 
-        onDownloadFailed: (taskId, error) => {
+        function onDownloadFailed(taskId, error) {
             console.warn("[MediaDownloader] Download failed:", taskId, error);
         }
     }
 
     // ─── Estado ───────────────────────────────────────────────────────────
 
-    property var activeTasks: ({})
-    property var activeTaskIds: []
+    // Las descargas activas y el historial los pintan MediaActiveList y
+    // MediaHistoryList, que son autónomos: aquí no se duplica ese estado.
+    property string currentTab: "download"
+    readonly property var tabs: ["download", "active", "history"]
+
     property bool loading: false
     property string lastError: ""
     property string lastUrl: ""
@@ -62,20 +53,7 @@ Item {
     property var currentFormats: []
     property bool hasMediaInfo: currentMediaInfo !== null
 
-    // Reintentar conexión al backend cada 2s hasta que responda
-    Timer {
-        id: backendRetryTimer
-        interval: 2000
-        repeat: true
-        running: true
-        onTriggered: {
-            if (ipc.backendReady) {
-                stop();
-            } else {
-                ipc.ping().then(() => {}).catch(() => {});
-            }
-        }
-    }
+    // Sin temporizador de reintento: el singleton se reconecta por su cuenta.
 
     // ─── Keys ─────────────────────────────────────────────────────────────
 
@@ -103,6 +81,7 @@ Item {
         UrlInput {
             id: urlInput
             Layout.fillWidth: true
+            visible: root.currentTab === "download"
             detecting: root.loading
 
             onSubmit: (url) => {
@@ -116,7 +95,7 @@ Item {
             Layout.alignment: Qt.AlignHCenter
             Layout.fillWidth: true
             spacing: 8
-            visible: root.loading
+            visible: root.loading && root.currentTab === "download"
 
             MaterialLoadingIndicator {
                 Layout.alignment: Qt.AlignVCenter
@@ -135,6 +114,7 @@ Item {
         ErrorBanner {
             message: root.lastError
             hint: root.errorHint(root.lastError)
+            visible: root.currentTab === "download"
         }
 
         // ─── Preview + formato (zona desplazable y acotada) ───────────────
@@ -151,7 +131,7 @@ Item {
             Layout.preferredHeight: mediaForm.implicitHeight
             Layout.minimumHeight: 52
             Layout.maximumHeight: Math.max(52, Math.min(mediaForm.implicitHeight, root.height * 0.6))
-            visible: root.hasMediaInfo
+            visible: root.hasMediaInfo && root.currentTab === "download"
             contentHeight: mediaForm.implicitHeight
             clip: true
             boundsBehavior: Flickable.StopAtBounds
@@ -188,7 +168,7 @@ Item {
             buttonRadius: Appearance.rounding.normal
             buttonColor: Appearance.colors.colPrimary
             enabled: root.hasMediaInfo && !root.loading
-            visible: root.hasMediaInfo
+            visible: root.hasMediaInfo && root.currentTab === "download"
 
             RowLayout {
                 anchors.centerIn: parent
@@ -213,64 +193,58 @@ Item {
             }
         }
 
-        // ─── Active Downloads ─────────────────────────────────────────────
+        // ─── Selector de vista: Descargar · Activas · Historial ───────────
+        //
+        // El widget vivía solo en la pestaña "Descargar" del sidebar: el
+        // historial era inalcanzable desde aquí. Ahora ambas vistas comparten
+        // los mismos componentes que el panel flotante.
+
+        SecondaryTabBar {
+            id: widgetTabBar
+            Layout.fillWidth: true
+            Layout.topMargin: 2
+            currentIndex: root.tabs.indexOf(root.currentTab)
+
+            SecondaryTabButton {
+                buttonIcon: "download"
+                buttonText: Translation.tr("Download")
+                onClicked: root.currentTab = "download"
+            }
+
+            SecondaryTabButton {
+                buttonIcon: "downloading"
+                buttonText: activeList.count > 0
+                    ? `${Translation.tr("Active")} (${activeList.count})`
+                    : Translation.tr("Active")
+                onClicked: root.currentTab = "active"
+            }
+
+            SecondaryTabButton {
+                buttonIcon: "history"
+                buttonText: Translation.tr("History")
+                onClicked: root.currentTab = "history"
+            }
+        }
+
+        // ─── Descargas activas / historial ────────────────────────────────
 
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: 0
-            visible: root.activeTaskIds.length > 0
+            visible: root.currentTab !== "download"
 
-            RowLayout {
-                id: activeHeader
-                anchors.top: parent.top
-                anchors.left: parent.left
-                anchors.right: parent.right
-                spacing: 6
-
-                MaterialSymbol {
-                    text: "downloading"
-                    iconSize: 16
-                    color: Appearance.colors.colOnLayer0
-                    opacity: 0.8
-                }
-
-                StyledText {
-                    Layout.fillWidth: true
-                    text: Translation.tr("Active Downloads")
-                    font.pixelSize: Appearance.font.pixelSize.small
-                    font.weight: Font.Medium
-                    color: Appearance.colors.colOnLayer0
-                    opacity: 0.8
-                }
-
-                StyledText {
-                    text: root.activeTaskIds.length
-                    font.pixelSize: Appearance.font.pixelSize.small
-                    color: Appearance.colors.colOnLayer0
-                    opacity: 0.5
-                }
+            MediaActiveList {
+                id: activeList
+                anchors.fill: parent
+                visible: root.currentTab === "active"
             }
 
-            ListView {
-                anchors.top: activeHeader.bottom
-                anchors.topMargin: 6
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                spacing: 8
-                clip: true
-
-                model: root.activeTaskIds
-                delegate: DownloadProgressCard {
-                    width: ListView.view.width
-                    task: root.activeTasks[modelData]
-
-                    onCancelClicked: (taskId) => { ipc.cancelDownload(taskId); }
-                    onPauseClicked: (taskId) => { ipc.pauseDownload(taskId); }
-                    onResumeClicked: (taskId) => { ipc.resumeDownload(taskId); }
-                    onRemoveClicked: (taskId) => { ipc.removeDownload(taskId); }
-                }
+            MediaHistoryList {
+                id: historyList
+                anchors.fill: parent
+                mode: "history"
+                visible: root.currentTab === "history"
             }
         }
 
@@ -279,7 +253,7 @@ Item {
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            visible: !root.hasMediaInfo && root.activeTaskIds.length === 0 && !root.loading
+            visible: !root.hasMediaInfo && root.currentTab === "download" && !root.loading
 
             ColumnLayout {
                 anchors.centerIn: parent
@@ -453,79 +427,16 @@ Item {
         ipc.startDownload(config)
             .then((result) => {
                 console.log("[MediaDownloader] Download started:", result.taskId);
-                // Añadir a la lista de activas
-                root.addTaskToList(result);
+                // El estado lo mantiene MediaActiveList: se le pide que vuelva
+                // a consultar la cola del demonio.
+                activeList.refresh();
                 // Limpiar URL
                 urlInput.clear();
                 root.currentMediaInfo = null;
+                root.currentTab = "active";
             })
             .catch((err) => {
                 root.lastError = err.message || Translation.tr("Failed to start download");
             });
-    }
-
-    function addTaskToList(result) {
-        const task = {
-            id: result.taskId,
-            status: "queued",
-            mediaInfo: result.mediaInfo,
-            options: {
-                url: root.lastUrl,
-                format: formatSelector.selectedFormat,
-                quality: formatSelector.selectedQuality,
-                extractAudio: formatSelector.extractAudio,
-            },
-            progress: {
-                percent: 0,
-                speed: 0,
-                eta: 0,
-                downloadedBytes: 0,
-                totalBytes: 0,
-                speedFormatted: "",
-                etaFormatted: "",
-                downloadedFormatted: "",
-                totalFormatted: "",
-            },
-            createdAt: Date.now(),
-        };
-
-        root.activeTasks[result.taskId] = task;
-        root.activeTaskIds = Object.keys(root.activeTasks);
-    }
-
-    function updateTaskProgress(taskId, progress) {
-        if (root.activeTasks[taskId]) {
-            root.activeTasks[taskId].progress = progress;
-            root.activeTaskIds = Object.keys(root.activeTasks); // Trigger refresh
-        }
-    }
-
-    function handleStatusChange(taskId, status, previous) {
-        if (root.activeTasks[taskId]) {
-            root.activeTasks[taskId].status = status;
-            root.activeTaskIds = Object.keys(root.activeTasks);
-        }
-
-        if (status === "completed" || status === "failed" || status === "cancelled") {
-            // Eliminar de activas después de un momento
-            Qt.callLater(() => {
-                delete root.activeTasks[taskId];
-                root.activeTaskIds = Object.keys(root.activeTasks);
-            });
-        }
-    }
-
-    function refreshDownloads() {
-        if (!ipc.backendReady) return;
-        ipc.listDownloads()
-            .then((tasks) => {
-                for (const t of tasks) {
-                    if (t.status === "running" || t.status === "paused" || t.status === "queued") {
-                        root.activeTasks[t.id] = t;
-                    }
-                }
-                root.activeTaskIds = Object.keys(root.activeTasks);
-            })
-            .catch(() => {});
     }
 }

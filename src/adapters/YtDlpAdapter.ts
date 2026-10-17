@@ -4,6 +4,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { statSync } from "node:fs";
 import type {
   MediaInfo,
   FormatInfo,
@@ -120,6 +121,10 @@ export class YtDlpAdapter extends EventEmitter {
     const args: string[] = [
       "--no-warnings",
       "--newline",
+      // Reanudar el .part existente si lo hay. Es lo que permite continuar una
+      // descarga interrumpida (por ejemplo tras reiniciar el demonio) en vez
+      // de empezarla de cero. yt-dlp ya lo hace por defecto; queda explícito.
+      "--continue",
       // --print implica --quiet y en modo silencioso yt-dlp no imprime el
       // progreso: sin --progress la UI nunca recibe actualizaciones.
       "--progress",
@@ -190,7 +195,7 @@ export class YtDlpAdapter extends EventEmitter {
         this.emit("completed", {
           taskId,
           filePath: finalPath,
-          fileSize: 0, // Se actualizará después
+          fileSize: this.readFileSize(finalPath),
         } as CompletionEvent);
       } else {
         const errorMsg = this.parseError(stderrBuffer, exitCode);
@@ -388,6 +393,22 @@ export class YtDlpAdapter extends EventEmitter {
       return JSON.parse(trimmed.slice(jsonStart));
     } catch {
       throw new Error("Respuesta inesperada de yt-dlp al analizar el enlace");
+    }
+  }
+
+  /**
+   * Tamaño real del archivo descargado.
+   *
+   * Antes se emitía siempre `fileSize: 0` con el comentario "se actualizará
+   * después", pero nadie lo actualizaba y el historial acababa usando el
+   * total estimado del progreso. Con un path válido, este es el dato exacto.
+   */
+  private readFileSize(filePath: string): number {
+    if (!filePath) return 0;
+    try {
+      return statSync(filePath).size;
+    } catch {
+      return 0;
     }
   }
 

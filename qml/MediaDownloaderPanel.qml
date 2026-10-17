@@ -18,32 +18,30 @@ Item {
     id: root
 
     // ─── IPC ──────────────────────────────────────────────────────────────
+    //
+    // El backend es un singleton compartido (MediaDownloaderIPC), no una
+    // instancia por UI: así el panel y el widget del sidebar hablan con el
+    // mismo demonio y ven la misma cola. `ipc` es un alias para no tener que
+    // reescribir todas las llamadas.
 
-    MediaDownloaderIPC {
-        id: ipc
-        onBackendReadyChanged: {
-            if (ipc.backendReady) {
-                root.loadHistory();
-                root.refreshActive();
+    readonly property var ipc: MediaDownloaderIPC
+
+    Connections {
+        target: MediaDownloaderIPC
+
+        function onBackendReadyChanged() {
+            // Las listas de activas e historial se refrescan solas (también en
+            // cada reconexión); aquí solo queda la configuración.
+            if (MediaDownloaderIPC.backendReady) {
                 root.loadConfig();
             }
-        }
-
-        onDownloadProgress: (taskId, progress) => {
-            root.updateTaskProgress(taskId, progress);
-        }
-
-        onDownloadStatus: (taskId, status, previous) => {
-            root.handleStatusChange(taskId, status, previous);
         }
     }
 
     // ─── Estado ───────────────────────────────────────────────────────────
 
-    property var activeTasks: ({})
-    property var activeTaskIds: []
-    property var historyEntries: []
-    property var favoriteEntries: []
+    // El estado de descargas activas e historial vive en MediaActiveList y
+    // MediaHistoryList, que consultan al demonio y se refrescan solos.
     property var currentMediaInfo: null
     property var currentFormats: []
 
@@ -54,20 +52,8 @@ Item {
 
     property int sidebarPadding: 10
 
-    // Reintentar conexión al backend
-    Timer {
-        id: backendRetryTimer
-        interval: 2000
-        repeat: true
-        running: true
-        onTriggered: {
-            if (ipc.backendReady) {
-                stop();
-            } else {
-                ipc.ping().then(() => {}).catch(() => {});
-            }
-        }
-    }
+    // Aquí ya no hay temporizador de reintento: la reconexión con el demonio la
+    // gestiona MediaDownloaderIPC, que no se destruye con este panel.
 
     // ─── Config ───────────────────────────────────────────────────────────
 
@@ -241,9 +227,11 @@ Item {
                     onClicked: {
                         const tabs = ["download", "history", "favorites", "config", "logs"];
                         root.currentTab = tabs[index];
-                        // Cargar datos al cambiar de pestaña
-                        if (tabs[index] === "favorites") root.loadFavorites();
-                        if (tabs[index] === "history") root.loadHistory();
+                        // Las listas se refrescan solas, pero volver a pedir los
+                        // datos al abrir la pestana evita ver algo obsoleto.
+                        if (tabs[index] === "favorites") favoritesList.refresh();
+                        if (tabs[index] === "history") historyList.refresh();
+                        if (tabs[index] === "download") activeList.refresh();
                     }
                 }
             }
@@ -266,109 +254,30 @@ Item {
 
                 // ─── Tab: Active Downloads ────────────────────────────────
                 Item {
-                    ListView {
+                    MediaActiveList {
+                        id: activeList
                         anchors.fill: parent
                         anchors.margins: 8
-                        spacing: 6
-                        clip: true
-
-                        model: root.activeTaskIds
-                        delegate: DownloadProgressCard {
-                            width: ListView.view.width
-                            task: root.activeTasks[modelData]
-
-                            onCancelClicked: (taskId) => { ipc.cancelDownload(taskId); }
-                            onPauseClicked: (taskId) => { ipc.pauseDownload(taskId); }
-                            onResumeClicked: (taskId) => { ipc.resumeDownload(taskId); }
-                            onRemoveClicked: (taskId) => { ipc.removeDownload(taskId); }
-                        }
-
-                        StyledText {
-                            anchors.centerIn: parent
-                            text: Translation.tr("No active downloads")
-                            color: Appearance.colors.colOnLayer0
-                            opacity: 0.4
-                            visible: parent.count === 0
-                        }
                     }
                 }
 
                 // ─── Tab: History ─────────────────────────────────────────
                 Item {
-                    ColumnLayout {
+                    MediaHistoryList {
+                        id: historyList
                         anchors.fill: parent
                         anchors.margins: 8
-                        spacing: 6
-
-                        MaterialTextField {
-                            id: historySearch
-                            Layout.fillWidth: true
-                            placeholderText: Translation.tr("Search history...")
-                            onTextChanged: {
-                                if (text.length > 2) {
-                                    root.searchHistory(text);
-                                } else if (text.length === 0) {
-                                    root.loadHistory();
-                                }
-                            }
-                        }
-
-                        ListView {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            spacing: 4
-                            clip: true
-
-                            model: root.historyEntries
-                            delegate: HistoryItem {
-                                width: ListView.view.width
-                                entry: modelData
-                                handleDelete: function(entryId) {
-                                    ipc.deleteHistory(entryId).then(() => root.loadHistory());
-                                }
-                                handleFavorite: function(entryId) {
-                                    ipc.toggleFavorite(entryId).then(() => root.loadHistory());
-                                }
-                            }
-
-                            StyledText {
-                                anchors.centerIn: parent
-                                text: Translation.tr("No history yet")
-                                color: Appearance.colors.colOnLayer0
-                                opacity: 0.4
-                                visible: parent.count === 0
-                            }
-                        }
+                        mode: "history"
                     }
                 }
 
                 // ─── Tab: Favorites ───────────────────────────────────────
                 Item {
-                    ListView {
+                    MediaHistoryList {
+                        id: favoritesList
                         anchors.fill: parent
                         anchors.margins: 8
-                        spacing: 4
-                        clip: true
-
-                        model: root.favoriteEntries
-                        delegate: HistoryItem {
-                            width: ListView.view.width
-                            entry: modelData
-                            handleDelete: function(entryId) {
-                                ipc.deleteHistory(entryId).then(() => root.loadFavorites());
-                            }
-                            handleFavorite: function(entryId) {
-                                ipc.toggleFavorite(entryId).then(() => root.loadFavorites());
-                            }
-                        }
-
-                        StyledText {
-                            anchors.centerIn: parent
-                            text: Translation.tr("No favorites yet")
-                            color: Appearance.colors.colOnLayer0
-                            opacity: 0.4
-                            visible: parent.count === 0
-                        }
+                        mode: "favorites"
                     }
                 }
 
@@ -701,75 +610,15 @@ Item {
 
         ipc.startDownload(params)
             .then((result) => {
-                const task = {
-                    id: result.taskId,
-                    status: "queued",
-                    mediaInfo: result.mediaInfo,
-                    options: params,
-                    progress: { percent: 0, speed: 0, eta: 0, downloadedBytes: 0, totalBytes: 0, speedFormatted: "", etaFormatted: "", downloadedFormatted: "", totalFormatted: "" },
-                    createdAt: Date.now(),
-                };
-                root.activeTasks[result.taskId] = task;
-                root.activeTaskIds = Object.keys(root.activeTasks);
+                // El estado lo mantiene MediaActiveList: solo hay que pedirle que
+                // vuelva a consultar la cola del demonio.
+                activeList.refresh();
                 root.currentMediaInfo = null;
                 urlInput.clear();
             })
             .catch((err) => {
                 root.lastError = err.message;
             });
-    }
-
-    function updateTaskProgress(taskId, progress) {
-        if (root.activeTasks[taskId]) {
-            root.activeTasks[taskId].progress = progress;
-            root.activeTaskIds = Object.keys(root.activeTasks);
-        }
-    }
-
-    function handleStatusChange(taskId, status, previous) {
-        if (root.activeTasks[taskId]) {
-            root.activeTasks[taskId].status = status;
-            root.activeTaskIds = Object.keys(root.activeTasks);
-        }
-
-        if (status === "completed" || status === "failed" || status === "cancelled") {
-            Qt.callLater(() => {
-                delete root.activeTasks[taskId];
-                root.activeTaskIds = Object.keys(root.activeTasks);
-                root.loadHistory();
-            });
-        }
-    }
-
-    function refreshActive() {
-        ipc.listDownloads()
-            .then((tasks) => {
-                for (const t of tasks) {
-                    if (["running", "paused", "queued"].includes(t.status)) {
-                        root.activeTasks[t.id] = t;
-                    }
-                }
-                root.activeTaskIds = Object.keys(root.activeTasks);
-            })
-            .catch(() => {});
-    }
-
-    function loadHistory() {
-        ipc.listHistory(100)
-            .then((entries) => { root.historyEntries = entries; })
-            .catch(() => {});
-    }
-
-    function loadFavorites() {
-        ipc.listFavorites(100)
-            .then((entries) => { root.favoriteEntries = entries; })
-            .catch(() => {});
-    }
-
-    function searchHistory(query) {
-        ipc.searchHistory(query)
-            .then((entries) => { root.historyEntries = entries; })
-            .catch(() => {});
     }
 
     function loadConfig() {
@@ -874,94 +723,4 @@ Item {
         }
     }
 
-    // ─── Componente interno para items del historial ──────────────────────
-
-    component HistoryItem: Rectangle {
-        id: root
-        property var entry: null
-        property var handleDelete: null
-        property var handleFavorite: null
-
-        height: 50
-        radius: Appearance.rounding.small
-        color: Appearance.colors.colLayer2
-
-        RowLayout {
-            anchors.fill: parent
-            anchors.margins: 8
-            spacing: 8
-
-            StyledImage {
-                Layout.preferredWidth: 36
-                Layout.preferredHeight: 36
-                source: entry?.thumbnail ?? ""
-                fillMode: Image.PreserveAspectCrop
-                visible: (entry?.thumbnail ?? "").length > 0
-            }
-
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 2
-
-                StyledText {
-                    Layout.fillWidth: true
-                    text: entry?.title ?? "Unknown"
-                    font.pixelSize: Appearance.font.pixelSize.small
-                    font.weight: Font.Medium
-                    color: Appearance.colors.colOnLayer0
-                    elide: Text.ElideRight
-                }
-
-                StyledText {
-                    text: `${entry?.provider ?? ""} · ${entry?.format?.toUpperCase() ?? ""}${entry?.quality ? " · " + entry.quality : ""}`
-                    font.pixelSize: 10
-                    color: Appearance.colors.colOnLayer0
-                    opacity: 0.5
-                }
-            }
-
-            RippleButton {
-                id: favBtn
-                Layout.preferredWidth: 28
-                Layout.preferredHeight: 28
-                buttonRadius: height / 2
-                buttonColor: "transparent"
-
-                MaterialSymbol {
-                    anchors.centerIn: parent
-                    text: root.entry?.isFavorite ? "star" : "star_border"
-                    iconSize: 16
-                    color: root.entry?.isFavorite ? "#FFC107" : Appearance.colors.colOnLayer0
-                }
-
-                onClicked: {
-                    if (root.handleFavorite && root.entry) {
-                        root.handleFavorite(root.entry.id);
-                    }
-                }
-            }
-
-            RippleButton {
-                id: delBtn
-                Layout.preferredWidth: 28
-                Layout.preferredHeight: 28
-                buttonRadius: height / 2
-                buttonColor: "transparent"
-
-                MaterialSymbol {
-                    anchors.centerIn: parent
-                    text: "delete"
-                    iconSize: 16
-                    color: Appearance.colors.colOnLayer0
-                    opacity: 0.6
-                }
-
-                onClicked: {
-                    if (root.handleDelete && root.entry) {
-                        root.handleDelete(root.entry.id);
-                    }
-                }
-            }
-        }
-    }
 }

@@ -4,7 +4,7 @@
 
 import { randomUUID } from "node:crypto";
 import { ProviderManager } from "./ProviderManager.js";
-import { DownloadQueue } from "./DownloadQueue.js";
+import { DownloadQueue, type QueuePersistence } from "./DownloadQueue.js";
 import { YtDlpAdapter } from "../adapters/YtDlpAdapter.js";
 import type {
   MediaInfo,
@@ -26,10 +26,10 @@ export class DownloadManager {
   readonly downloadQueue: DownloadQueue;
   readonly ytDlpAdapter: YtDlpAdapter;
 
-  constructor() {
+  constructor(persistence?: QueuePersistence) {
     this.ytDlpAdapter = new YtDlpAdapter();
     this.providerManager = new ProviderManager();
-    this.downloadQueue = new DownloadQueue(this.ytDlpAdapter);
+    this.downloadQueue = new DownloadQueue(this.ytDlpAdapter, 3, persistence);
   }
 
   // ─── Información de Media ──────────────────────────────────────────────

@@ -1,0 +1,33 @@
+[Unit]
+Description=Media Download Center — backend de descargas (yt-dlp)
+# Sin URL: systemd parte la línea por espacios e intenta validar cada palabra.
+Documentation=man:yt-dlp(1)
+# No depende de la sesión gráfica: si Hyprland o QuickShell se reinician, las
+# descargas en curso siguen (era justo el problema de tener el backend como
+# proceso hijo del panel).
+After=network-online.target
+Wants=network-online.target
+
+# Si yt-dlp no está instalado el proceso sale con código 1: no conviene entrar
+# en un bucle de reinicios.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# __NODE_BIN__ y __BACKEND_DIR__ los sustituye install.sh por las rutas reales.
+# %t es el XDG_RUNTIME_DIR del usuario: ahí vive el socket al que se conecta la
+# interfaz de QuickShell.
+ExecStart=__NODE_BIN__ __BACKEND_DIR__/dist/index.js --daemon --socket %t/media-download-center.sock
+WorkingDirectory=__BACKEND_DIR__
+
+Restart=always
+RestartSec=2
+
+# Al parar el servicio se avisa al backend (SIGTERM) para que termine los
+# yt-dlp en curso con killAll() y cierre SQLite ordenadamente.
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

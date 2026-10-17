@@ -12,14 +12,18 @@ import { join } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import process from "node:process";
 import { JsonRpcServer } from "./ipc/JsonRpcServer.js";
+import { StdioTransport } from "./ipc/StdioTransport.js";
+import { SocketTransport, isSocketAlive, removeStaleSocket } from "./ipc/SocketTransport.js";
+import type { ITransport } from "./ipc/Transport.js";
 import { DownloadManager } from "./core/DownloadManager.js";
 import { AppDatabase } from "./db/Database.js";
 import { HistoryRepository } from "./db/HistoryRepository.js";
 import { ConfigRepository } from "./db/ConfigRepository.js";
+import { QueueRepository, type PersistedQueueRow } from "./db/QueueRepository.js";
 import { HistoryService } from "./services/HistoryService.js";
 import { ConfigService } from "./services/ConfigService.js";
 import { createAllProviders } from "./providers/index.js";
-import { TaskStatus } from "./types/index.js";
+import { TaskStatus, type DownloadTask } from "./types/index.js";
 
 // ─── Configuración Global ──────────────────────────────────────────────────
 
@@ -30,11 +34,95 @@ if (!existsSync(DATA_DIR)) {
 
 const DB_PATH = join(DATA_DIR, "data.db");
 
+// ─── Modo de ejecución ─────────────────────────────────────────────────────
+//
+//   (por defecto)     → stdio: hijo de QuickShell. Retrocompatible.
+//   --daemon          → demonio independiente escuchando en un socket Unix.
+//   --socket <ruta>   → demonio en una ruta concreta (implica --daemon).
+//
+// En modo daemon la UI puede abrirse y cerrarse cuanto quiera: el proceso y
+// las descargas en curso sobreviven.
+
+const USAGE = `
+Media Download Center — backend JSON-RPC
+
+Uso:
+  node dist/index.js [opciones]
+
+Opciones:
+  --daemon            Arranca como demonio en un socket Unix.
+  --socket <ruta>     Ruta del socket (implica --daemon).
+  --stdio             Modo clásico por stdin/stderr (por defecto).
+  -h, --help          Muestra esta ayuda.
+
+Variables:
+  XDG_RUNTIME_DIR     Directorio del socket por defecto.
+`;
+
+interface RunMode {
+  daemon: boolean;
+  socketPath: string;
+}
+
+function defaultSocketPath(): string {
+  const runtimeDir =
+    process.env.XDG_RUNTIME_DIR ?? join("/run/user", String(process.getuid?.() ?? 0));
+  return join(runtimeDir, "media-download-center.sock");
+}
+
+function parseArgs(argv: string[]): RunMode {
+  let daemon = false;
+  let socketPath = "";
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+
+    if (arg === "--daemon") {
+      daemon = true;
+    } else if (arg === "--stdio") {
+      daemon = false;
+    } else if (arg === "--socket") {
+      socketPath = argv[++i] ?? "";
+      daemon = true;
+    } else if (arg.startsWith("--socket=")) {
+      socketPath = arg.slice("--socket=".length);
+      daemon = true;
+    } else if (arg === "-h" || arg === "--help") {
+      console.log(USAGE);
+      process.exit(0);
+    } else {
+      console.warn(`[MediaDownloadCenter] Argumento desconocido: ${arg}`);
+    }
+  }
+
+  if (!socketPath) {
+    socketPath = defaultSocketPath();
+  }
+
+  return { daemon, socketPath };
+}
+
 // ─── Inicialización ────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  // Forzar stdout sin buffer para IPC con QuickShell
-  (process.stdout as any)._handle?.setBlocking(true);
+  const mode = parseArgs(process.argv.slice(2));
+
+  // ── Cerrojo de instancia única (solo en modo daemon) ──
+  if (mode.daemon) {
+    if (await isSocketAlive(mode.socketPath)) {
+      console.error(
+        `[MediaDownloadCenter] Ya hay un daemon activo en ${mode.socketPath}; esta instancia termina`
+      );
+      process.exit(0);
+    }
+    // Socket huérfano de un proceso muerto: no debe impedir el arranque.
+    removeStaleSocket(mode.socketPath);
+  }
+
+  if (!mode.daemon) {
+    // Forzar stdout sin buffer para IPC con QuickShell
+    (process.stdout as any)._handle?.setBlocking(true);
+  }
 
   // ── Capa de persistencia ──
   const db = new AppDatabase(DB_PATH);
@@ -42,9 +130,11 @@ async function main(): Promise<void> {
   const configRepo = new ConfigRepository(db);
   const historyService = new HistoryService(historyRepo);
   const configService = new ConfigService(configRepo);
+  const queueRepo = new QueueRepository(db);
 
   // ── Motor de descargas ──
-  const downloadManager = new DownloadManager();
+  // La cola persiste sus tareas para poder reanudarlas tras un reinicio.
+  const downloadManager = new DownloadManager(queueRepo);
 
   // ── Registrar providers ──
   const providers = createAllProviders(downloadManager.ytDlpAdapter);
@@ -68,13 +158,70 @@ async function main(): Promise<void> {
   };
   applyCookieConfig();
 
+  // El ajuste de concurrencia estaba en la config pero nunca se aplicaba:
+  // la cola corría siempre con 3. Ahora se respeta al arrancar y al cambiar.
+  const applyConcurrency = (): void => {
+    const cfg = configService.getAll();
+    const max = Number(cfg.maxConcurrentDownloads) || 3;
+    downloadManager.downloadQueue.setMaxConcurrent(max);
+  };
+  applyConcurrency();
+
+  // ── Recuperar la cola de un arranque anterior ──
+  // Se re-encolan las descargas que quedaron a medias ANTES de aceptar
+  // clientes, de modo que continúen aunque no haya ninguna UI abierta.
+  const recoverQueue = (): number => {
+    let rows: PersistedQueueRow[] = [];
+    try {
+      rows = queueRepo.listAll();
+    } catch (err) {
+      console.error("[MediaDownloadCenter] No se pudo leer la cola persistente:", err);
+      return 0;
+    }
+
+    if (rows.length === 0) return 0;
+
+    const tasks: DownloadTask[] = [];
+    for (const row of rows) {
+      try {
+        const task = JSON.parse(row.task_json) as DownloadTask;
+        if (task?.id && task.options?.url) {
+          tasks.push(task);
+        }
+      } catch {
+        console.warn(`[MediaDownloadCenter] Tarea persistida ilegible; se descarta (${row.id})`);
+      }
+    }
+
+    // Las filas terminales o ilegibles no deben sobrevivir al arranque: a
+    // partir de aquí la cola se re-persiste desde cero.
+    queueRepo.clear();
+
+    const restored = downloadManager.downloadQueue.restore(tasks);
+    if (restored > 0) {
+      console.log(`[MediaDownloadCenter] Cola recuperada: ${restored} descarga(s) en curso`);
+    }
+    return restored;
+  };
+  recoverQueue();
+
   const ytDlpVersion = await downloadManager.ytDlpAdapter.getVersion();
   console.log(`[MediaDownloadCenter] yt-dlp version: ${ytDlpVersion}`);
   console.log(`[MediaDownloadCenter] Providers loaded: ${providers.length}`);
   console.log(`[MediaDownloadCenter] Data directory: ${DATA_DIR}`);
 
   // ── Servidor IPC ──
-  const server = new JsonRpcServer();
+  // El transporte decide si somos un hijo de QuickShell (stdio) o un daemon
+  // independiente al que la UI se conecta por socket Unix.
+  const transport: ITransport = mode.daemon
+    ? new SocketTransport(mode.socketPath)
+    : new StdioTransport();
+
+  const server = new JsonRpcServer(transport, {
+    // En modo daemon, cerrar la barra lateral o el panel NO debe terminar el
+    // proceso: eso es exactamente lo que interrumpía las descargas.
+    exitOnClientDisconnect: !mode.daemon,
+  });
 
   // ==========================================================================
   // REGISTRO DE HANDLERS JSON-RPC
@@ -331,12 +478,14 @@ async function main(): Promise<void> {
       configService.setMany(p);
     }
     applyCookieConfig();
+    applyConcurrency();
     return { success: true };
   }, "Set configuration");
 
   server.on("config.reset", () => {
     configService.resetToDefaults();
     applyCookieConfig();
+    applyConcurrency();
     return { success: true };
   }, "Reset configuration to defaults");
 
@@ -356,20 +505,33 @@ async function main(): Promise<void> {
 
   // ─── Iniciar ─────────────────────────────────────────────────────────────
 
-  console.log("[MediaDownloadCenter] Starting IPC server...");
-  // Debug: escribir también a stderr para verificar pipes
-  console.error("[MediaDownloadCenter] stderr: server starting");
-  process.stderr.write("STDERR_READY_TEST\n");
+  if (!mode.daemon) {
+    // Debug: escribir también a stderr para verificar pipes
+    console.error("[MediaDownloadCenter] stderr: server starting");
+    process.stderr.write("STDERR_READY_TEST\n");
+  }
+
+  console.log(
+    mode.daemon
+      ? `[MediaDownloadCenter] Daemon escuchando en ${mode.socketPath}`
+      : "[MediaDownloadCenter] Starting IPC server (modo stdio)..."
+  );
   server.start();
 
-  // Heartbeat a stderr cada 5s para verificar que el proceso vive
-  setInterval(() => {
-    process.stderr.write("HEARTBEAT\n");
-  }, 5000);
+  if (!mode.daemon) {
+    // En stdio la UI comprueba con este latido que el proceso sigue vivo. En
+    // modo daemon es innecesario (el socket ya lo demuestra) y ensuciaría el
+    // journal.
+    setInterval(() => {
+      process.stderr.write("HEARTBEAT\n");
+    }, 5000);
+  }
 
-  // Manejar cierre graceful
-  const shutdown = () => {
+  // Manejar cierre graceful: aquí SÍ se cancelan las descargas en curso, a
+  // diferencia de la simple desconexión de un cliente en modo daemon.
+  const shutdown = (): void => {
     console.log("[MediaDownloadCenter] Shutting down...");
+    server.shutdown();
     downloadManager.destroy();
     db.close();
     process.exit(0);

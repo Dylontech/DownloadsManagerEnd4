@@ -1,15 +1,29 @@
+pragma Singleton
+pragma ComponentBehavior: Bound
+
 // ============================================================================
-// MediaDownloaderIPC — Puente JSON-RPC entre QuickShell y Node.js backend
+// MediaDownloaderIPC — Puente JSON-RPC entre QuickShell y el demonio Node.js
 // ============================================================================
 //
-// Gestiona el proceso Node.js, envía requests JSON-RPC y recibe respuestas.
-// Expone señales y métodos para que la UI los consuma.
+// ⚠️ Los `pragma` van en la PRIMERA línea a propósito: el registro de módulos
+// solo los detecta ahí. Si `pragma Singleton` queda debajo de comentarios o
+// imports, el tipo se registra como componente normal y `MediaDownloaderIPC`
+// se convierte en un objeto vacío (sin propiedades ni métodos) en vez del
+// singleton.
 //
-// Uso:
-//   MediaDownloaderIPC {
-//     onMediaInfoReceived: (info) => { ... }
-//     onDownloadProgress: (taskId, progress) => { ... }
-//   }
+// Es un SINGLETON a propósito. El backend es un demonio independiente que
+// escucha en un socket Unix, y este objeto es el único cliente del shell.
+//
+// Antes cada UI (panel flotante y widget del sidebar) instanciaba su propio
+// `MediaDownloaderIPC`, y dentro había un `Process` hijo del componente: al
+// cerrar el sidebar o cambiar de pestaña QuickShell destruía el componente y
+// mataba el proceso Node, que a su vez mataba los yt-dlp en curso. Ahora aquí
+// no se lanza ningún proceso: solo se abre (y se reabre) el socket.
+//
+// Uso desde cualquier componente, sin instanciarlo:
+//   Connections { target: MediaDownloaderIPC
+//       function onDownloadProgress(taskId, progress) { ... } }
+//   MediaDownloaderIPC.startDownload({ url: ... })
 //
 // ============================================================================
 
@@ -19,9 +33,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-pragma ComponentBehavior: Bound
-
-Scope {
+Singleton {
     id: root
 
     // ─── Propiedades ──────────────────────────────────────────────────────
@@ -34,8 +46,19 @@ Scope {
     property var pendingRequests: ({})
     property var requestIdCounter: 1
 
-    // Estado de conexión
-    property bool connected: process.running && root.backendReady
+    // ─── Conexión con el demonio ──────────────────────────────────────────
+
+    readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") ?? ""
+    readonly property string socketPath: root.runtimeDir
+        ? `${root.runtimeDir}/media-download-center.sock`
+        : ""
+    readonly property string serviceUnit: "media-download-center.service"
+    readonly property int reconnectInterval: 2000
+
+    // Estado de conexión. `backendReady` solo se pone a true cuando el demonio
+    // ha contestado por el socket, no por el mero hecho de abrirlo.
+    property bool connecting: false
+    property bool connected: socket.connected && root.backendReady
 
     // Buffer de logs accesible desde la UI
     property var logBuffer: []
@@ -75,86 +98,130 @@ Scope {
     // Error general
     signal ipcError(string message)
 
-    // ─── Proceso Node.js ──────────────────────────────────────────────────
+    // ─── Cliente del socket del demonio ───────────────────────────────────
 
-    Process {
-        id: process
-        // __BACKEND_DIR__ es reemplazado por install.sh con la ruta absoluta
-        // del repositorio en el momento de la instalación (paso 4/6).
-        command: ["/bin/bash", "-c", "cd __BACKEND_DIR__ && /usr/bin/node dist/index.js"]
-        running: true
-        stdinEnabled: true
+    Socket {
+        id: socket
+        path: root.socketPath
+        connected: false
 
-        stdout: SplitParser {
-            onRead: line => {
-                // stdout no se usa (SplitParser no funciona con stdout en esta versión)
-            }
+        parser: SplitParser {
+            splitMarker: "\n"
+            onRead: line => root.processLine(line)
         }
 
-        stderr: SplitParser {
-            onRead: line => {
-                const text = line.trim();
-                if (!text) return;
-
-                // Los mensajes JSON-RPC empiezan con {, el resto son debug
-                if (text.startsWith("{")) {
-                    root.processLine(text);
-                } else if (text.startsWith("STDERR_") || text === "HEARTBEAT") {
-                    // Ignorar mensajes de debug interno
-                } else {
-                    root.addLog("[stderr] " + text, "error");
-                }
-            }
-        }
-
-        onRunningChanged: {
-            if (running) {
-                root.addLog("Backend process started", "info");
+        onConnectionStateChanged: {
+            if (connected) {
+                root.onSocketUp();
             } else {
-                root.backendReady = false;
-                root.addLog("Backend process stopped", "warn");
+                root.onSocketDown();
+            }
+        }
+
+        onError: (error) => {
+            root.connecting = false;
+            root.backendReady = false;
+            // Lo normal nada más arrancar la sesión: el demonio aún no está.
+            // El error concreto de QLocalSocket no aporta nada al usuario.
+            root.addLog("Socket no disponible (" + error + ")", "warn");
+        }
+    }
+
+    // Reintento de conexión. Cerrar la barra lateral ya no interrumpe nada, así
+    // que este temporizador solo cubre "el demonio todavía no escuchaba".
+    Timer {
+        id: reconnectTimer
+        interval: root.reconnectInterval
+        repeat: true
+        running: true
+        onTriggered: {
+            if (!socket.connected && !root.connecting) {
+                root.connectSocket();
             }
         }
     }
 
-    // Buffer de línea parcial
-    property string lineBuffer: ""
+    // Si el socket no existe, se pide a systemd que levante el servicio.
+    // `systemctl --user start` sobre una unidad ya activa no hace nada, así que
+    // repetirlo es inofensivo.
+    Timer {
+        id: serviceStartTimer
+        interval: 10000
+        repeat: true
+        running: true
+        onTriggered: {
+            if (!socket.connected) {
+                Quickshell.execDetached(["systemctl", "--user", "start", root.serviceUnit]);
+            }
+        }
+    }
 
-    // ─── Procesamiento de líneas JSON desde stdout ──────────────────────
+    Component.onCompleted: root.connectSocket()
+
+    // ─── Ciclo de vida de la conexión ─────────────────────────────────────
+
+    function connectSocket() {
+        if (!root.socketPath) return;
+        if (socket.connected) return;
+        root.connecting = true;
+        socket.connected = true;
+    }
+
+    function onSocketUp() {
+        root.connecting = false;
+        root.addLog("Conectado al demonio (" + root.socketPath + ")", "ok");
+    }
+
+    function onSocketDown() {
+        root.connecting = false;
+        if (!root.backendReady) return;
+        root.backendReady = false;
+        root.addLog("Desconectado del demonio", "warn");
+        root.serverShutdown();
+    }
+
+    /**
+     * El demonio envía `server.ready` en CADA conexión nueva, así que es aquí
+     * donde la UI se entera de que debe volver a pedir su estado (descargas
+     * activas e historial): el modelo no se guarda en QML a propósito.
+     */
+    function handleServerReady(params) {
+        root.backendReady = true;
+        root.backendVersion = params?.version || "";
+        root.addLog("Backend ready (v" + root.backendVersion + ")", "ok");
+    }
+
+    // ─── Procesamiento de las líneas que llegan por el socket ────────────
 
     function processLine(line) {
         if (!line) return;
 
-        // Acumular en buffer (por si llegaron fragmentos)
-        const pending = root.lineBuffer + line;
+        const text = line.trim();
+        if (!text) return;
 
-        // Intentar parsear como JSON
+        // SplitParser ya entrega líneas completas, así que solo se procesa lo
+        // que parece JSON-RPC; el resto (logs del demonio) se ignora.
+        if (!text.startsWith("{")) return;
+
+        let msg;
         try {
-            const msg = JSON.parse(pending);
-            root.lineBuffer = ""; // Limpiar buffer
-
-            if (msg.jsonrpc !== "2.0") return;
-
-            if (msg.id !== undefined && msg.id !== null && "result" in msg) {
-                // Es una respuesta a una request nuestra
-                root.handleResponse(msg);
-            } else if (msg.id !== undefined && msg.id !== null && "error" in msg) {
-                // Es una respuesta con error
-                root.handleErrorResponse(msg);
-            } else if (msg.method) {
-                // Es una notificación del servidor
-                root.handleNotification(msg);
-            }
+            msg = JSON.parse(text);
         } catch (e) {
-            // JSON incompleto, esperar más datos. Si el buffer ya parece
-            // cerrado (o es enorme) está corrupto: descartarlo, no vaya a
-            // bloquear todas las respuestas siguientes.
-            if (pending.endsWith("}") || pending.length > 512 * 1024) {
-                root.lineBuffer = "";
-                root.addLog("Respuesta IPC ilegible descartada", "warn");
-            } else {
-                root.lineBuffer = pending;
-            }
+            root.addLog("Mensaje IPC ilegible descartado: " + text.slice(0, 120), "warn");
+            return;
+        }
+
+        if (msg.jsonrpc !== "2.0") return;
+
+        if (msg.id !== undefined && msg.id !== null && "result" in msg) {
+            // Es una respuesta a una request nuestra
+            root.handleResponse(msg);
+        } else if (msg.id !== undefined && msg.id !== null && "error" in msg) {
+            // Es una respuesta con error
+            root.handleErrorResponse(msg);
+        } else if (msg.method) {
+            // Es una notificación del servidor
+            root.handleNotification(msg);
         }
     }
 
@@ -162,13 +229,11 @@ Scope {
 
     function sendRequest(method, params) {
         return new Promise((resolve, reject) => {
-            if (!process.running) {
-                reject(new Error("Backend not running"));
-                return;
-            }
-
-            if (!process.stdinEnabled) {
-                reject(new Error("Process stdin is not available"));
+            if (!socket.connected) {
+                // No se pierde nada: la UI se resincroniza al reconectar, así
+                // que es mejor fallar rápido que dejar la promesa colgada.
+                root.connectSocket();
+                reject(new Error("Sin conexión con el demonio de descargas"));
                 return;
             }
 
@@ -198,7 +263,8 @@ Scope {
             });
             timer.start();
 
-            process.write(JSON.stringify(request) + "\n");
+            socket.write(JSON.stringify(request) + "\n");
+            socket.flush();
         });
     }
 
@@ -225,9 +291,7 @@ Scope {
     function handleNotification(msg) {
         switch (msg.method) {
             case "server.ready":
-                root.backendReady = true;
-                root.backendVersion = msg.params?.version || "";
-                root.addLog("Backend ready (v" + root.backendVersion + ")", "ok");
+                root.handleServerReady(msg.params);
                 root.serverReady();
                 break;
 

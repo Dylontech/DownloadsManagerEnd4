@@ -1,6 +1,6 @@
 # 📥 Media Download Center
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Version](https://img.shields.io/badge/version-1.1.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-339933)
 
@@ -38,6 +38,9 @@ Soporta 8 plataformas: YouTube, Twitch, TikTok, Instagram, Twitter/X, Vimeo, Sou
 - 📦 **Cola de descargas** con control de concurrencia
 - ⏸️ **Pausar/Reanudar** descargas (vía SIGSTOP/SIGCONT)
 - 🔄 **Reintentos automáticos** ante fallos
+- 🛡️ **Descargas a prueba de UI**: el backend es un demonio independiente, así que cerrar la barra lateral o el panel **no interrumpe** lo que se está descargando
+- ♻️ **Reanudación tras reinicio**: las descargas en curso se re-encolan al arrancar el demonio y yt-dlp continúa el `.part` que quedó a medias
+- 📂 **Historial y descargas activas** tanto en el sidebar como en el panel flotante (una sola cola compartida)
 - 📜 **Historial** de descargas completo
 - ⭐ **Favoritos** para marcar tus descargas importantes
 - ⚙️ **Configuración** persistente (ruta, formato, calidad)
@@ -81,11 +84,12 @@ chmod +x install.sh
 pkill -x qs && qs -c ii &
 ```
 
-El script `install.sh` (pipeline de 6 pasos) verifica las dependencias, instala
+El script `install.sh` (pipeline de 7 pasos) verifica las dependencias, instala
 los paquetes npm, compila TypeScript, copia los módulos QML a la config `ii`,
-**parchea la ruta del backend** con la ubicación real del repo, **integra el
-widget automáticamente** en tu config QuickShell (con backups `*.mdc-backup`) y
-ejecuta un **smoke test** del backend.
+**integra el widget automáticamente** en tu config QuickShell (con backups
+`*.mdc-backup`), instala el **demonio systemd --user** que atiende el socket de
+las descargas, añade el **atajo `CTRL + SUPER + D`** en
+`~/.config/hypr/custom/keybinds.lua` y ejecuta un **smoke test** del backend.
 
 > 📖 Detalle completo de pasos, protocolo IPC y arquitectura:
 > [`docs/MAPA_FUNCIONAMIENTO.md`](docs/MAPA_FUNCIONAMIENTO.md)
@@ -125,11 +129,17 @@ El script `install.sh` los copia automáticamente a la configuración de QuickSh
 
 ### 4. Configurar QuickShell (automático)
 
-`install.sh` (paso 5/6) edita con backups e idempotencia:
+`install.sh` (paso 5/7) edita con backups e idempotencia:
 
 - `~/.config/quickshell/ii/GlobalStates.qml` → propiedad `mediaDownloaderFloatingOpen`
 - `~/.config/quickshell/ii/panelFamilies/IllogicalImpulseFamily.qml` → import + `PanelLoader`
 - `~/.config/quickshell/ii/shell.qml` → `IpcHandler` con target `mediaDownloader`
+- `~/.config/quickshell/ii/modules/ii/sidebarRight/BottomWidgetGroup.qml` → pestaña «Descargas»
+
+Y el paso 6/7 instala el demonio, sin el cual no hay descargas:
+
+- `~/.config/systemd/user/media-download-center.service` → `systemctl --user enable --now media-download-center`
+- `~/.config/hypr/custom/keybinds.lua` → atajo `CTRL + SUPER + D` para el panel flotante
 
 Si prefieres hacerlo a mano, usa `./install.sh --no-integrate` y replica esas
 tres ediciones consultando el [mapa de funcionamiento](docs/MAPA_FUNCIONAMIENTO.md#7-integración-con-hyprland--quickshell-ii).
@@ -172,18 +182,28 @@ pkill quickshell && quickshell &
 qs -c ii ipc call mediaDownloader toggle
 ```
 
-- Atajo global en `hyprland.conf`:
+- Atajo global recomendado. En este escritorio Hyprland se configura con Lua, así
+  que la línea va en `~/.config/hypr/custom/keybinds.lua`:
 
-```ini
-bind = SUPER, D, exec, qs -c ii ipc call mediaDownloader toggle
+```lua
+-- El panel flotante registra el GlobalShortcut "mediaDownloaderFloatingToggle",
+-- así que el bind no necesita lanzar ningún proceso.
+hl.bind("CTRL + SUPER + D", hl.dsp.global("quickshell:mediaDownloaderFloatingToggle"),
+    { description = "Shell: Toggle media downloader" })
 ```
+
+> ⚠️ `SUPER + D` **no** sirve: Hyprland ya lo usa para «Window: Maximize».
 
 ---
 
 ## 🖥️ Modos de Visualización
 
 ### Modo Pestaña (BottomWidgetGroup)
-Diseñado para integrarse como una pestaña más en el grupo de widgets inferiores. Interfaz compacta con funcionalidades esenciales.
+Diseñado para integrarse como una pestaña más en el grupo de widgets inferiores.
+Tiene **tres vistas conmutables**: *Descargar* (enlace → preview → formato),
+*Activas* (cola en vivo con pausa/cancelar) e *Historial* (descargas
+completadas, con buscador y favoritos). Las tres comparten los mismos
+componentes que el panel flotante, así que muestran siempre la misma cola.
 
 ### Modo Panel (Sidebar)
 Panel completo en la barra lateral derecha con acceso a historial, favoritos, configuración y logs.
@@ -212,27 +232,29 @@ Ventana independiente que puede abrirse/cerrarse mediante un atajo de teclado gl
 
 ### El backend no inicia
 ```bash
+# Estado del demonio (es un servicio de usuario, no un hijo de QuickShell)
+systemctl --user status media-download-center
+
+# Logs del backend
+journalctl --user -u media-download-center -n 50
+
+# ¿Existe el socket al que se conecta la UI?
+ls -l "${XDG_RUNTIME_DIR}/media-download-center.sock"
+
 # Verifica que yt-dlp está instalado
 yt-dlp --version
-
-# Verifica Node.js
-node --version
-
-# Reconstruye el proyecto
-cd ~/Descargas/MediaDownloadCenter
-npm run build
-
-# Prueba el backend directamente
-node dist/index.js
 ```
 
-### "Cannot read property 'write' of undefined"
-Este error ocurría cuando `process.stdin` no estaba disponible en QuickShell. Asegúrate de tener la versión más reciente de los módulos QML con `stdinEnabled: true` y usando `process.write()` en lugar de `process.stdin.write()`.
+### La UI dice «Sin conexión con el demonio de descargas»
+La interfaz (QuickShell) y el backend (demonio) son procesos independientes que
+se hablan por un socket Unix. Si no existe, arráncalo:
 
-**Solución**: Actualiza los archivos QML y reinicia QuickShell:
 ```bash
-pkill quickshell && rm -rf ~/.cache/quickshell && quickshell &
+systemctl --user start media-download-center
 ```
+
+La UI reintenta la conexión cada 2 s y, además, pide a systemd que arranque el
+servicio, así que normalmente se recupera sola.
 
 ### Las descargas fallan inmediatamente
 ```bash

@@ -13,13 +13,18 @@
 #   ./install.sh --uninstall                            # deshacer integración
 #
 # Pipeline:
-#   1/6  Dependencias del sistema (node, npm, yt-dlp)
-#   2/6  Dependencias de Node.js (npm ci / npm install)
-#   3/6  Compilación TypeScript (dist/)
-#   4/6  Copia de módulos QML + parcheo de la ruta del backend
-#   5/6  Integración con la config QuickShell "ii" (GlobalStates,
-#        IllogicalImpulseFamily, IpcHandler en shell.qml)
-#   6/6  Smoke test del backend (ping JSON-RPC por stdin/stderr)
+#   1/7  Dependencias del sistema (node, npm, yt-dlp)
+#   2/7  Dependencias de Node.js (npm ci / npm install)
+#   3/7  Compilación TypeScript (dist/)
+#   4/7  Copia de módulos QML
+#   5/7  Integración con la config QuickShell "ii" (GlobalStates,
+#        IllogicalImpulseFamily, IpcHandler en shell.qml, pestaña lateral)
+#   6/7  Demonio systemd --user + atajo de Hyprland
+#   7/7  Smoke test del backend (ping JSON-RPC)
+#
+# Arquitectura desde la v1.1: el backend NO es un proceso hijo de QuickShell,
+# sino un demonio escuchando en un socket Unix. Por eso cerrar la barra lateral
+# (o el panel flotante) ya no interrumpe las descargas en curso.
 # =============================================================================
 
 set -euo pipefail
@@ -104,6 +109,27 @@ do_uninstall() {
         fi
     done
 
+    # ── Demonio systemd ──
+    local unit="${HOME}/.config/systemd/user/media-download-center.service"
+    if command -v systemctl &>/dev/null; then
+        systemctl --user disable --now media-download-center.service &>/dev/null || true
+        log_ok "Servicio systemd detenido y deshabilitado"
+    fi
+    if [ -f "$unit" ]; then
+        rm -f "$unit"
+        command -v systemctl &>/dev/null && systemctl --user daemon-reload &>/dev/null || true
+        log_ok "Unidad systemd eliminada (${unit})"
+    fi
+    rm -f "${XDG_RUNTIME_DIR:-/tmp}/media-download-center.sock"
+    log_ok "Socket del demonio eliminado"
+
+    # ── Atajo de Hyprland (bloque delimitado en custom/keybinds.lua) ──
+    local keybinds="${HOME}/.config/hypr/custom/keybinds.lua"
+    if [ -f "$keybinds" ] && grep -q '>>> Media Download Center >>>' "$keybinds"; then
+        sed -i '/>>> Media Download Center >>>/,/<<< Media Download Center <<</d' "$keybinds"
+        log_ok "Atajo de Hyprland eliminado de ${keybinds}"
+    fi
+
     echo ""
     log_warn "Reinicia QuickShell para aplicar los cambios:"
     echo -e "     ${BLUE}pkill -f 'qs -c ii' && qs -c ii &${NC}"
@@ -124,7 +150,7 @@ done
 # ═════════════════════════════════════════════════════════════════════════════
 echo -e "${CYAN}"
 echo "  ╔══════════════════════════════════════════════════╗"
-echo "  ║         Media Download Center — v1.0             ║"
+echo "  ║         Media Download Center — v1.1             ║"
 echo "  ║          Instalación / Actualización             ║"
 echo "  ╚══════════════════════════════════════════════════╝"
 echo -e "${NC}"
@@ -132,7 +158,7 @@ echo -e "${NC}"
 # ═════════════════════════════════════════════════════════════════════════════
 # PASO 1 — Dependencias del sistema
 # ═════════════════════════════════════════════════════════════════════════════
-log_step "1/6 — Dependencias del sistema"
+log_step "1/7 — Dependencias del sistema"
 
 HAS_ERRORS=false
 check_cmd "node"   "sudo pacman -S nodejs  |  brew install node  |  winget install OpenJS.NodeJS"  || HAS_ERRORS=true
@@ -156,7 +182,7 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 # PASO 2 — Dependencias de Node.js
 # ═════════════════════════════════════════════════════════════════════════════
-log_step "2/6 — Dependencias de Node.js (npm install)"
+log_step "2/7 — Dependencias de Node.js (npm install)"
 
 cd "$REPO_DIR"
 
@@ -190,7 +216,7 @@ log_ok "better-sqlite3 nativo compilado ✓"
 # ═════════════════════════════════════════════════════════════════════════════
 # PASO 3 — Compilar TypeScript
 # ═════════════════════════════════════════════════════════════════════════════
-log_step "3/6 — Compilando TypeScript (npm run build)"
+log_step "3/7 — Compilando TypeScript (npm run build)"
 
 npm run build 2>&1
 
@@ -203,15 +229,17 @@ fi
 log_ok "TypeScript compilado → dist/"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PASO 4 — Instalar módulos QML en QuickShell + parchear ruta del backend
+# PASO 4 — Instalar módulos QML en QuickShell
 # ═════════════════════════════════════════════════════════════════════════════
-log_step "4/6 — Instalando módulos QML en QuickShell"
+log_step "4/7 — Instalando módulos QML en QuickShell"
 
 QML_REQUIRED=(
     "MediaDownloaderIPC.qml"
     "MediaDownloaderPanel.qml"
     "MediaDownloaderWidget.qml"
     "MediaDownloaderFloating.qml"
+    "MediaActiveList.qml"
+    "MediaHistoryList.qml"
     "FormatSelector.qml"
     "MediaPreview.qml"
     "UrlInput.qml"
@@ -239,37 +267,33 @@ else
     exit 1
 fi
 
-# ── Parcheo de la ruta del backend ──────────────────────────────────────────
-# El QML fuente usa el placeholder __BACKEND_DIR__; se sustituye por la ruta
-# absoluta real de este repositorio para que QuickShell pueda lanzar el proceso
-# Node.js sin importar dónde esté clonado el proyecto.
-NODE_BIN="$(command -v node)"
+# ── Verificación del puente QML ────────────────────────────────────────────
+# Desde la v1.1 el QML ya NO lanza el backend: se conecta por socket al demonio
+# de systemd. Si el fichero instalado todavía crea un `Process`, es una versión
+# antigua y volveríamos a matar las descargas al cerrar la barra lateral.
 IPC_FILE="${QML_DEST}/MediaDownloaderIPC.qml"
 
-if [ -f "$IPC_FILE" ]; then
-    sed -i "s|command: .*|        command: [\"${NODE_BIN}\", \"${REPO_DIR}/dist/index.js\"]|" "$IPC_FILE"
-
-    if grep -q 'command:.*__BACKEND_DIR__' "$IPC_FILE"; then
-        log_error "El parcheo de la ruta del backend falló (placeholder sin sustituir en la línea command:)"
-        exit 1
-    fi
-
-    PATCHED_PATH="$(grep -o '"[^"]*/dist/index.js"' "$IPC_FILE" | head -1 | tr -d '"')"
-    if [ -f "$PATCHED_PATH" ]; then
-        log_ok "Ruta del backend parcheada → ${PATCHED_PATH}"
-    else
-        log_error "La ruta parcheada no apunta a un dist/index.js válido: ${PATCHED_PATH}"
-        exit 1
-    fi
-else
-    log_error "No se encontró ${IPC_FILE} — imposible parchear la ruta del backend"
+if [ ! -f "$IPC_FILE" ]; then
+    log_error "No se encontró ${IPC_FILE}"
     exit 1
 fi
+
+if grep -q '__BACKEND_DIR__' "$IPC_FILE" || grep -q 'Process {' "$IPC_FILE"; then
+    log_error "El MediaDownloaderIPC.qml instalado es de una versión antigua (lanza un proceso en vez de usar el socket)."
+    exit 1
+fi
+
+if ! grep -q 'Socket {' "$IPC_FILE"; then
+    log_error "El MediaDownloaderIPC.qml instalado no contiene un Socket — copia incompleta."
+    exit 1
+fi
+
+log_ok "Puente QML verificado: usa Socket (ya no hay proceso hijo)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # PASO 5 — Integración con la config QuickShell "ii"
 # ═════════════════════════════════════════════════════════════════════════════
-log_step "5/6 — Integración con QuickShell (${QS_CONFIG_DIR})"
+log_step "5/7 — Integración con QuickShell (${QS_CONFIG_DIR})"
 
 if [ "$INTEGRATE" = false ]; then
     log_warn "Integración omitida (--no-integrate)"
@@ -422,9 +446,79 @@ EOF
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PASO 6 — Smoke test del backend (JSON-RPC por stdin/stderr)
-# ═════════════════════════════════════════════════════════════════════════════
-log_step "6/6 — Smoke test del backend (ping JSON-RPC)"
+# PASO 6 — Demonio systemd --user + atajo de Hyprland
+# ═════════════════════════════════════════════════════════════════════════
+log_step "6/7 — Demonio systemd --user"
+
+NODE_BIN="$(command -v node)"
+SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+UNIT_NAME="media-download-center.service"
+UNIT_FILE="${SYSTEMD_USER_DIR}/${UNIT_NAME}"
+SOCKET_PATH="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/media-download-center.sock"
+SERVICE_TEMPLATE="${REPO_DIR}/packaging/media-download-center.service"
+
+if ! command -v systemctl &>/dev/null; then
+    log_warn "systemctl no disponible. Arranca el demonio a mano:"
+    log_warn "  ${NODE_BIN} ${REPO_DIR}/dist/index.js --daemon &"
+elif [ ! -f "$SERVICE_TEMPLATE" ]; then
+    log_error "No se encontró ${SERVICE_TEMPLATE} — no se puede instalar el servicio"
+    exit 1
+else
+    mkdir -p "$SYSTEMD_USER_DIR"
+    backup_once "$UNIT_FILE"
+
+    sed -e "s|__NODE_BIN__|${NODE_BIN}|g" \
+        -e "s|__BACKEND_DIR__|${REPO_DIR}|g" \
+        "$SERVICE_TEMPLATE" > "$UNIT_FILE"
+    log_ok "Unidad instalada → ${UNIT_FILE}"
+
+    systemctl --user daemon-reload
+    if systemctl --user enable --now "$UNIT_NAME" 2>/dev/null; then
+        log_ok "Servicio habilitado y arrancado (${UNIT_NAME})"
+    else
+        log_warn "No se pudo activar el servicio. ¿Existe una sesión systemd de usuario?"
+        log_warn "Prueba a mano: systemctl --user enable --now ${UNIT_NAME}"
+    fi
+
+    if [ -S "$SOCKET_PATH" ]; then
+        log_ok "Socket del demonio activo → ${SOCKET_PATH}"
+    else
+        log_warn "El socket ${SOCKET_PATH} todavía no existe."
+        log_warn "Revisa los logs: journalctl --user -u ${UNIT_NAME} -n 30"
+    fi
+fi
+
+# ── Atajo de Hyprland ───────────────────────────────────────────────────────
+# Hyprland está configurado con Lua: las personalizaciones van en
+# custom/keybinds.lua, NO en hyprland.conf (que no existe en esa instalación).
+# SUPER+D ya está ocupado por "Window: Maximize", de ahí CTRL+SUPER+D.
+KEYBINDS_FILE="${HOME}/.config/hypr/custom/keybinds.lua"
+
+if [ -f "$KEYBINDS_FILE" ]; then
+    if grep -q '>>> Media Download Center >>>' "$KEYBINDS_FILE"; then
+        log_ok "Atajo de Hyprland ya presente en custom/keybinds.lua"
+    else
+        cat >> "$KEYBINDS_FILE" <<'EOF'
+
+-- >>> Media Download Center >>>
+-- Panel flotante del gestor de descargas (activas + historial).
+-- No se usa SUPER+D: Hyprland ya lo tiene para "Window: Maximize".
+hl.bind("CTRL + SUPER + D", hl.dsp.global("quickshell:mediaDownloaderFloatingToggle"),
+    { description = "Shell: Toggle media downloader" })
+-- <<< Media Download Center <<<
+EOF
+        log_ok "Atajo CTRL+SUPER+D añadido → ${KEYBINDS_FILE}"
+        log_warn "Recarga Hyprland para que el atajo surta efecto: hyprctl reload"
+    fi
+else
+    log_warn "No se encontró ${KEYBINDS_FILE}"
+    log_warn "Añade a mano: hl.bind(\"CTRL + SUPER + D\", hl.dsp.global(\"quickshell:mediaDownloaderFloatingToggle\"))"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════
+# PASO 7 — Smoke test del backend (modo stdio, sin tocar el demonio)
+# ═════════════════════════════════════════════════════════════════════════
+log_step "7/7 — Smoke test del backend (ping JSON-RPC)"
 
 SMOKE_OUTPUT="$(printf '{"jsonrpc":"2.0","id":1,"method":"ping"}\n' | node "${REPO_DIR}/dist/index.js" 2>&1 >/dev/null || true)"
 
@@ -453,10 +547,16 @@ echo "     matarías la pantalla de bloqueo (recuperación: hyprlock)."
 echo -e "     ${BLUE}pkill -x qs && qs -c ii &${NC}"
 echo ""
 echo -e "${CYAN}🎮  ABRIR EL PANEL FLOTANTE:${NC}"
+echo -e "   ${BLUE}CTRL + SUPER + D${NC}  (atajo de Hyprland)"
 echo -e "   ${BLUE}qs -c ii ipc call mediaDownloader toggle${NC}"
 echo ""
-echo "   Atajo de teclado en Hyprland (hyprland.conf):"
-echo -e "   ${BLUE}bind = SUPER, D, exec, qs -c ii ipc call mediaDownloader toggle${NC}"
+echo -e "${CYAN}⬇️  GESTOR DE DESCARGAS:${NC}"
+echo "   • Sidebar derecho → pestaña «Descargas» → Descargar / Activas / Historial"
+echo "   • El historial y las descargas activas se ven en el sidebar y en el panel"
+echo ""
+echo -e "${CYAN}🔧  DEMONIO (sobrevive a cerrar la barra lateral):${NC}"
+echo -e "   ${BLUE}systemctl --user status media-download-center${NC}"
+echo -e "   ${BLUE}journalctl --user -u media-download-center -f${NC}"
 echo ""
 echo -e "${CYAN}📋  DESINSTALAR:${NC}"
 echo -e "   ${BLUE}./install.sh --uninstall${NC}"

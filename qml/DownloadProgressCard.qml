@@ -58,7 +58,7 @@ Item {
                 }
 
                 StatusBadge {
-                    status: root.task?.status ?? "queued"
+                    badgeStatus: root.task?.status ?? "queued"
                 }
             }
 
@@ -214,10 +214,25 @@ Item {
         return parts.join(" · ");
     }
 
+    /**
+     * Etiqueta legible del estado ("Queued", "Running", ...).
+     *
+     * Antes el badge hacía `root.status.charAt(0)` sobre una propiedad que no
+     * existía en la tarjeta: el estado nunca se pintaba y cada tarjeta dejaba
+     * un `TypeError: Cannot read property 'charAt' of undefined` en el log.
+     * Esto es especialmente visible con las tareas recuperadas tras un
+     * reinicio, cuyo progreso aún no tiene campos formateados.
+     */
+    function statusLabel(value) {
+        const text = String(value ?? "");
+        if (text.length === 0) return "";
+        return Translation.tr(text.charAt(0).toUpperCase() + text.slice(1));
+    }
+
     // ─── Componentes internos ──────────────────────────────────────────────
 
     component StatusBadge: Rectangle {
-        property string status: "queued"
+        property string badgeStatus: "queued"
         height: 20
         radius: height / 2
         color: root.borderColor()
@@ -226,7 +241,7 @@ Item {
         StyledText {
             anchors.centerIn: parent
             anchors.margins: 8
-            text: Translation.tr(root.status.charAt(0).toUpperCase() + root.status.slice(1))
+            text: root.statusLabel(badgeStatus)
             font.pixelSize: 10
             font.weight: Font.Medium
             color: root.borderColor()
@@ -234,20 +249,23 @@ Item {
     }
 
     component StatItem: RowLayout {
+        // Cada componente interno tiene que referenciar SUS propiedades: usar
+        // `root.` apunta a la tarjeta (que no las tiene) y el texto queda vacío.
+        id: statItemRoot
         property string statIcon: ""
         property string label: ""
         property string suffix: ""
         spacing: 3
 
         MaterialSymbol {
-            text: root.statIcon
+            text: statItemRoot.statIcon
             iconSize: 12
             color: Appearance.colors.colOnLayer0
             opacity: 0.5
         }
 
         StyledText {
-            text: root.label + root.suffix
+            text: statItemRoot.label + statItemRoot.suffix
             font.pixelSize: 10
             color: Appearance.colors.colOnLayer0
             opacity: 0.7
@@ -255,6 +273,7 @@ Item {
     }
 
     component ActionButton: RippleButton {
+        id: actionButtonRoot
         property string buttonIcon: ""
         property string buttonIconColor: Appearance.colors.colOnLayer0
         property string tooltipText: ""
@@ -265,13 +284,13 @@ Item {
 
         MaterialSymbol {
             anchors.centerIn: parent
-            text: root.buttonIcon
+            text: actionButtonRoot.buttonIcon
             iconSize: 18
-            color: root.buttonIconColor
+            color: actionButtonRoot.buttonIconColor
         }
 
         StyledToolTip {
-            text: root.tooltipText
+            text: actionButtonRoot.tooltipText
         }
     }
 }
