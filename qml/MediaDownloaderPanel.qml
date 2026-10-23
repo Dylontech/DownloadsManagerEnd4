@@ -207,31 +207,46 @@ Item {
 
         // ─── Tab Bar ──────────────────────────────────────────────────────
 
-        SecondaryTabBar {
-            id: tabBar
+        Flickable {
+            id: tabScroll
             Layout.fillWidth: true
-            currentIndex: ["download", "history", "favorites", "config", "logs"].indexOf(root.currentTab)
+            Layout.preferredHeight: tabBar.implicitHeight
+            contentWidth: tabBar.width
+            contentHeight: height
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            flickableDirection: Flickable.HorizontalFlick
+            interactive: contentWidth > width
 
-            Repeater {
-                model: [
-                    { icon: "downloading", name: Translation.tr("Active") },
-                    { icon: "history", name: Translation.tr("History") },
-                    { icon: "favorite", name: Translation.tr("Favorites") },
-                    { icon: "settings", name: Translation.tr("Config") },
-                    { icon: "bug_report", name: Translation.tr("Logs") },
-                ]
+            SecondaryTabBar {
+                id: tabBar
+                // TabBar reparte su ancho disponible a partes iguales entre
+                // los tabs. Dales ancho propio para que las etiquetas largas
+                // no se dibujen encima de las siguientes.
+                width: Math.max(tabScroll.width, 544)
+                height: implicitHeight
+                currentIndex: ["download", "history", "favorites", "config", "logs"].indexOf(root.currentTab)
 
-                delegate: SecondaryTabButton {
-                    buttonIcon: modelData.icon
-                    buttonText: modelData.name
-                    onClicked: {
-                        const tabs = ["download", "history", "favorites", "config", "logs"];
-                        root.currentTab = tabs[index];
-                        // Las listas se refrescan solas, pero volver a pedir los
-                        // datos al abrir la pestana evita ver algo obsoleto.
-                        if (tabs[index] === "favorites") favoritesList.refresh();
-                        if (tabs[index] === "history") historyList.refresh();
-                        if (tabs[index] === "download") activeList.refresh();
+                Repeater {
+                    model: [
+                        { icon: "downloading", name: Translation.tr("Active") },
+                        { icon: "history", name: Translation.tr("History") },
+                        { icon: "favorite", name: Translation.tr("Favorites") },
+                        { icon: "settings", name: Translation.tr("Config") },
+                        { icon: "bug_report", name: Translation.tr("Logs") },
+                    ]
+
+                    delegate: SecondaryTabButton {
+                        width: Math.max(88, modelData.name.length * 7 + 44)
+                        buttonIcon: modelData.icon
+                        buttonText: modelData.name
+                        onClicked: {
+                            const tabs = ["download", "history", "favorites", "config", "logs"];
+                            root.currentTab = tabs[index];
+                            if (tabs[index] === "favorites") favoritesList.refresh();
+                            if (tabs[index] === "history") historyList.refresh();
+                            if (tabs[index] === "download") activeList.refresh();
+                        }
                     }
                 }
             }

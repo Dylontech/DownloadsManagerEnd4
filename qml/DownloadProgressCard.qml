@@ -30,12 +30,14 @@ Item {
     Rectangle {
         id: cardRectangle
         anchors.fill: parent
+        implicitHeight: cardContent.implicitHeight + 20
         radius: Appearance.rounding.normal
         color: Appearance.colors.colLayer1
         border.width: 1
         border.color: root.borderColor()
 
         ColumnLayout {
+            id: cardContent
             anchors.fill: parent
             anchors.margins: 10
             spacing: 6
